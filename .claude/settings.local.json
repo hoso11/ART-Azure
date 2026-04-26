@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep:*)",
+      "Read(//c/Program Files/nodejs/**)",
+      "Read(//c/Program Files \\(x86\\)/nodejs/**)",
+      "Bash(find /c/Users/HP/Desktop/ART-Azure -type f \\\\\\(-name router.py -o -name config.py -o -name minio_adapter.py -o -name service.py -o -name main.py -o -name api.ts -o -name next.config* -o -name page.tsx \\\\\\))",
+      "Bash(/c/Users/HP/AppData/Local/Programs/Python/Python312/python.exe -c \"\nwith open\\('C:/Users/HP/Desktop/ART/frontend/src/components/home/FeaturedProducts.tsx', 'r', encoding='utf-8'\\) as f:\n    content = f.read\\(\\)\nchars = set\\(\\)\nfor c in content:\n    if 0x0530 <= ord\\(c\\) <= 0x058f:\n        chars.add\\(c\\)\nfor c in sorted\\(chars, key=ord\\):\n    print\\(f'  {c} = chr\\({ord\\(c\\)}\\)  # u{ord\\(c\\):04x}'\\)\n\")",
+      "Bash(PYTHONIOENCODING=utf-8 /c/Users/HP/AppData/Local/Programs/Python/Python312/python.exe -c \"\nwith open\\('C:/Users/HP/Desktop/ART/frontend/src/components/home/FeaturedProducts.tsx', 'r', encoding='utf-8'\\) as f:\n    content = f.read\\(\\)\nchars = set\\(\\)\nfor c in content:\n    if 0x0530 <= ord\\(c\\) <= 0x058f:\n        chars.add\\(c\\)\nfor c in sorted\\(chars, key=ord\\):\n    print\\(f'chr\\({ord\\(c\\)}\\),  # u{ord\\(c\\):04x}'\\)\n\")",
+      "Bash(PYTHONIOENCODING=utf-8 /c/Users/HP/AppData/Local/Programs/Python/Python312/python.exe -c \"\nimport json\nwith open\\(r'C:\\\\Users\\\\HP\\\\.claude\\\\projects\\\\C--Users-HP-Desktop-ART\\\\b2caf373-673a-4aff-9609-1be5c1dbcf3c.jsonl', 'r', encoding='utf-8'\\) as f:\n    lines = f.readlines\\(\\)\nobj = json.loads\\(lines[729]\\)\ncontent = obj['message']['content']\nprint\\(content[0]['text']\\)\n\")",
+      "Bash(PYTHONIOENCODING=utf-8 /c/Users/HP/AppData/Local/Programs/Python/Python312/python.exe -c \"\nimport json\nwith open\\(r'C:\\\\Users\\\\HP\\\\.claude\\\\projects\\\\C--Users-HP-Desktop-ART\\\\b2caf373-673a-4aff-9609-1be5c1dbcf3c.jsonl', 'r', encoding='utf-8'\\) as f:\n    lines = f.readlines\\(\\)\nobj = json.loads\\(lines[1248]\\)\ncontent = obj['message']['content']\nif isinstance\\(content, list\\):\n    for part in content:\n        if isinstance\\(part, dict\\) and 'text' in part:\n            print\\(part['text']\\)\nelif isinstance\\(content, str\\):\n    print\\(content\\)\n\")",
+      "Bash(PYTHONIOENCODING=utf-8 /c/Users/HP/AppData/Local/Programs/Python/Python312/python.exe << 'PYEOF'\nimport json\n\nwith open\\(r'C:\\\\Users\\\\HP\\\\.claude\\\\projects\\\\C--Users-HP-Desktop-ART\\\\b2caf373-673a-4aff-9609-1be5c1dbcf3c.jsonl', 'r', encoding='utf-8'\\) as f:\n    lines = f.readlines\\(\\)\nobj = json.loads\\(lines[1248]\\)\ncontent = obj['message']['content']\nif isinstance\\(content, list\\):\n    text = content[0]['text']\nelif isinstance\\(content, str\\):\n    text = content\n\nfor line in text.split\\('\\\\n'\\):\n    line = line.strip\\(\\)\n    if ' \\\\u2192 ' not in line:\n        continue\n    parts = line.split\\(' \\\\u2192 '\\)\n    if len\\(parts\\) == 2:\n        en = parts[0].strip\\(\\)\n        am = parts[1].strip\\(\\)\n        escaped = ''\n        for ch in am:\n            if ord\\(ch\\) > 127:\n                escaped += r'\\\\u' + '{:04x}'.format\\(ord\\(ch\\)\\)\n            else:\n                escaped += ch\n        print\\(f'    \"{en}\": \"{escaped}\",'\\)\nPYEOF)",
+      "Bash(chmod +x C:/Users/HP/Desktop/ART-Azure/scripts/azure/*.sh)",
+      "Bash(cp C:/Users/HP/Desktop/ART-Azure/.env.azure.example C:/Users/HP/Desktop/ART-Azure/.env.azure.test)",
+      "Bash(docker compose *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(rm -f .env.azure.test)",
+      "PowerShell(Get-Command *)"
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.env
+.env.*
+!.env.example
+npm-debug.log
+Dockerfile
+Dockerfile.azure
+.dockerignore
+translate_admin.py
+translate_fix.py

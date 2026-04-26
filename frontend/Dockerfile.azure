@@ -1,0 +1,52 @@
+# Production image for Azure Web App for Containers.
+# Uses Next.js "output: standalone" for a self-contained runtime.
+
+# ---- deps ----
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+# ---- build ----
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+# NEXT_PUBLIC_* values are baked in at build time. Override via --build-arg
+# when you need environment-specific values.
+ARG NEXT_PUBLIC_APP_NAME="ART Manufacturing"
+ARG NEXT_PUBLIC_API_URL="/api/v1"
+ARG NEXT_PUBLIC_MINIO_URL=""
+# INTERNAL_API_URL must also be baked at build time. Next.js 14 with
+# `output: "standalone"` freezes rewrites() destinations into
+# routes-manifest.json during `next build` — setting it at runtime has no
+# effect on the /api/* → backend proxy. In Azure sidecars the backend is
+# always reachable at localhost:8000 so we hardcode that default.
+ARG INTERNAL_API_URL="http://localhost:8000"
+ENV NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME \
+    NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
+    NEXT_PUBLIC_MINIO_URL=$NEXT_PUBLIC_MINIO_URL \
+    INTERNAL_API_URL=$INTERNAL_API_URL
+RUN npm run build
+
+# ---- runtime ----
+FROM node:20-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
+# Non-root user for the runtime
+RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+
+# Copy the standalone output plus the static assets / public dir.
+COPY --from=build --chown=nextjs:nodejs /app/public ./public
+COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+EXPOSE 3000
+
+CMD ["node", "server.js"]

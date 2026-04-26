@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.env
+.env.*
+!.env.example
+celerybeat-schedule
+Dockerfile
+Dockerfile.azure
+.dockerignore
+tests

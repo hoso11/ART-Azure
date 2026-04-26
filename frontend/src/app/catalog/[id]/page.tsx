@@ -1,0 +1,85 @@
+import { requireAuth } from "@/lib/auth";
+import { serverGet } from "@/lib/api";
+import { Product } from "@/types";
+import { formatCurrency } from "@/lib/utils";
+import Link from "next/link";
+
+function getProductPrimaryImage(product: Product): string | null {
+  const primary = product.images?.find((img) => img.is_primary);
+  if (primary?.url) return primary.url;
+  const first = product.images?.[0];
+  if (first?.url) return first.url;
+  return null;
+}
+
+export default async function CatalogProductPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  await requireAuth();
+  const { id } = await params;
+  const product = await serverGet<Product>(`/products/${id}`);
+
+  if (!product) {
+    return <div className="text-center py-12"><h1 className="text-xl font-semibold">Product not found</h1></div>;
+  }
+
+  const imageUrl = getProductPrimaryImage(product);
+
+  return (
+    <div className="max-w-5xl mx-auto px-6 py-8">
+      <Link href="/catalog" className="text-sm text-brand-700 hover:underline">&larr; Վերադառնալ կատալոգ</Link>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-4">
+        <div className="bg-brand-50 rounded-lg flex items-center justify-center h-80 overflow-hidden">
+          {imageUrl ? (
+            <img
+              src={imageUrl}
+              alt={product.name}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <svg className="h-24 w-24 text-brand-200" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+            </svg>
+          )}
+        </div>
+
+        <div>
+          <p className="text-sm text-brand-500 font-medium uppercase">{product.category?.name}</p>
+          <h1 className="text-3xl font-bold text-gray-900 mt-1">{product.name}</h1>
+          <p className="text-sm text-gray-400 font-mono mt-1">{product.sku}</p>
+          <p className="text-gray-600 mt-4">{product.description}</p>
+
+          {product.variants.length > 0 && (
+            <div className="mt-6">
+              <h3 className="font-semibold text-gray-900 mb-3">Հասանելի տարբերակներ</h3>
+              <div className="space-y-2">
+                {product.variants.map((v) => (
+                  <div key={v.id} className="flex items-center justify-between py-2 px-3 bg-gray-50 rounded-lg">
+                    <span className="text-sm">
+                      {v.size} / {v.color}
+                    </span>
+                    <span className="text-sm font-semibold text-brand-800">
+                      {formatCurrency(v.price)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-6">
+            <Link
+              href="/dashboard/orders/new"
+              className="inline-block px-6 py-3 bg-brand-800 text-white font-medium rounded-lg hover:bg-brand-900"
+            >
+              Place Order
+            </Link>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

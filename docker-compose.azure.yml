@@ -1,0 +1,113 @@
+# Localhost-based compose that mirrors the Azure Web App sidecar topology.
+# All services share one network namespace via `network_mode: service:<name>`
+# so that every connection between containers is through 127.0.0.1 — exactly
+# like Azure sidecars. Use this to validate the prod images before pushing.
+#
+# Run: docker compose -f docker-compose.azure.yml --env-file .env.azure up --build
+#
+# Image registry: Docker Hub. Override the username/tag via env:
+#   DOCKERHUB_USERNAME=hoso30    (default)
+#   IMAGE_TAG=latest             (default)
+#
+# Note: in Azure itself you do NOT run docker-compose. You set the main
+# container + sidecars in the Azure portal (see AZURE_DEPLOYMENT.md).
+
+services:
+  # ── MAIN container ──────────────────────────────────────
+  # Owns the network namespace. Every other service joins it.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.azure
+      args:
+        NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_MINIO_URL: ${NEXT_PUBLIC_MINIO_URL}
+    image: ${DOCKERHUB_USERNAME:-hoso30}/art-frontend:${IMAGE_TAG:-latest}
+    environment:
+      NODE_ENV: production
+      INTERNAL_API_URL: http://localhost:8000
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_MINIO_URL: ${NEXT_PUBLIC_MINIO_URL}
+    ports:
+      - "3000:3000"
+
+  # ── SIDECAR: backend (FastAPI + Alembic on boot) ────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.azure
+    image: ${DOCKERHUB_USERNAME:-hoso30}/art-backend:${IMAGE_TAG:-latest}
+    network_mode: service:frontend
+    environment: &backend_env
+      APP_NAME: ${APP_NAME}
+      APP_ENV: ${APP_ENV}
+      DEBUG: ${DEBUG}
+      LOG_FORMAT: ${LOG_FORMAT}
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES}
+      JWT_REFRESH_TOKEN_EXPIRE_DAYS: ${JWT_REFRESH_TOKEN_EXPIRE_DAYS}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
+      REDIS_URL: ${REDIS_URL}
+      STORAGE_BACKEND: ${STORAGE_BACKEND}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_USE_SSL: ${MINIO_USE_SSL}
+      MINIO_EXTERNAL_ENDPOINT: ${MINIO_EXTERNAL_ENDPOINT}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
+      SMTP_USE_TLS: ${SMTP_USE_TLS}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+
+  # ── SIDECAR: celery worker + beat ───────────────────────
+  # Reuses the backend image. `--beat` runs the scheduler inside the
+  # same worker process (fine for a single-instance deployment) — this
+  # matches the Azure startup command and avoids nested `bash -c "..."`
+  # which Azure's shell wrapper mangles.
+  worker:
+    image: ${DOCKERHUB_USERNAME:-hoso30}/art-backend:${IMAGE_TAG:-latest}
+    network_mode: service:frontend
+    depends_on:
+      - backend
+    command: celery -A app.worker.celery_app worker --beat --loglevel=info
+    environment: *backend_env
+
+  # ── SIDECAR: postgres ───────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    network_mode: service:frontend
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # ── SIDECAR: redis ──────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    network_mode: service:frontend
+
+  # ── SIDECAR: minio ──────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    network_mode: service:frontend
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+
+volumes:
+  pgdata:
+  minio_data:
