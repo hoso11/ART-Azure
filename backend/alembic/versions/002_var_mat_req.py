@@ -1,6 +1,6 @@
 """Add product size material requirements table
 
-Revision ID: 002_variant_material_requirements
+Revision ID: 002_var_mat_req
 Revises: 001_initial
 Create Date: 2026-04-26
 
@@ -12,7 +12,7 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "002_variant_material_requirements"
+revision: str = "002_var_mat_req"
 down_revision: Union[str, None] = "001_initial"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
