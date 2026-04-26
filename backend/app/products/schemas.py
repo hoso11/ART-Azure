@@ -4,30 +4,12 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-# ── Variant Material Requirements ────────────────────────
+# ── Shared nested types ──────────────────────────────────
 
 class MaterialInfo(BaseModel):
     id: int
     name: str
     unit: str
-    model_config = {"from_attributes": True}
-
-
-class VariantMaterialRequirementCreate(BaseModel):
-    material_id: int
-    quantity_per_item: Decimal = Field(gt=0)
-
-
-class VariantMaterialRequirementUpdate(BaseModel):
-    quantity_per_item: Decimal = Field(gt=0)
-
-
-class VariantMaterialRequirementResponse(BaseModel):
-    id: int
-    variant_id: int
-    material_id: int
-    quantity_per_item: Decimal
-    material: Optional[MaterialInfo] = None
     model_config = {"from_attributes": True}
 
 
@@ -105,6 +87,31 @@ class ProductMaterialResponse(BaseModel):
     material_id: int
     quantity_required: Decimal
     unit: str
+
+    model_config = {"from_attributes": True}
+
+
+# ── Product Size Material Requirements ──────────────────
+# Per-product, per-size material consumption table.
+# Columns: Material | Size | Quantity per item | (Unit from material)
+
+class ProductSizeMaterialRequirementCreate(BaseModel):
+    material_id: int
+    size: str = Field(min_length=1)
+    quantity_per_item: Decimal = Field(gt=0)
+
+
+class ProductSizeMaterialRequirementUpdate(BaseModel):
+    quantity_per_item: Decimal = Field(gt=0)
+
+
+class ProductSizeMaterialRequirementResponse(BaseModel):
+    id: int
+    product_id: int
+    material_id: int
+    size: str
+    quantity_per_item: Decimal
+    material: Optional[MaterialInfo] = None
 
     model_config = {"from_attributes": True}
 

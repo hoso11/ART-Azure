@@ -3,7 +3,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
-from app.products.models import Product, ProductVariant, ProductCategory, ProductImage, ProductMaterial, VariantMaterialRequirement
+from app.products.models import (
+    Product, ProductVariant, ProductCategory, ProductImage,
+    ProductMaterial, ProductSizeMaterialRequirement,
+)
 from app.exceptions import NotFoundException, ConflictException, ValidationException
 
 
@@ -153,37 +156,52 @@ async def create_variant(db: AsyncSession, product_id: int, **kwargs) -> Product
 
 
 async def update_variant(db: AsyncSession, variant_id: int, admin_user_id: int = 0, **kwargs) -> ProductVariant:
+    """Update variant fields. When stock_quantity increases, deducts materials from
+    inventory based on ProductSizeMaterialRequirement rows matching this
+    variant's (product_id, size). Validates all materials are sufficient before
+    any deduction (all-or-nothing)."""
     from app.inventory.service import get_material_by_id, create_stock_movement
     from app.inventory.models import StockMovementReason
 
-    result = await db.execute(
-        select(ProductVariant)
-        .options(selectinload(ProductVariant.material_requirements))
-        .where(ProductVariant.id == variant_id)
-    )
+    result = await db.execute(select(ProductVariant).where(ProductVariant.id == variant_id))
     variant = result.scalar_one_or_none()
     if not variant:
         raise NotFoundException(detail=f"Variant {variant_id} not found")
 
     new_stock = kwargs.get("stock_quantity")
-    if new_stock is not None and variant.material_requirements:
+    if new_stock is not None:
         diff = int(new_stock) - int(variant.stock_quantity)
         if diff > 0:
-            for req in variant.material_requirements:
-                material = await get_material_by_id(db, req.material_id)
-                needed = Decimal(str(diff)) * req.quantity_per_item
-                available = material.inventory.quantity_on_hand if material.inventory else Decimal("0")
-                if available < needed:
-                    raise ValidationException(
-                        detail=f"Insufficient stock for '{material.name}': need {needed} {material.unit}, have {available}",
-                        code="insufficient_material",
-                    )
-            for req in variant.material_requirements:
-                deduction = -(Decimal(str(diff)) * req.quantity_per_item)
-                await create_stock_movement(
-                    db, req.material_id, deduction,
-                    StockMovementReason.production_usage, admin_user_id,
+            # Find size-specific material requirements for this product+size
+            reqs_result = await db.execute(
+                select(ProductSizeMaterialRequirement).where(
+                    ProductSizeMaterialRequirement.product_id == variant.product_id,
+                    ProductSizeMaterialRequirement.size == variant.size,
                 )
+            )
+            size_reqs = list(reqs_result.scalars().all())
+
+            if size_reqs:
+                # Validate all materials first (fail-fast before touching inventory)
+                for req in size_reqs:
+                    material = await get_material_by_id(db, req.material_id)
+                    needed = Decimal(str(diff)) * req.quantity_per_item
+                    available = material.inventory.quantity_on_hand if material.inventory else Decimal("0")
+                    if available < needed:
+                        raise ValidationException(
+                            detail=(
+                                f"Insufficient stock for '{material.name}': "
+                                f"need {needed} {material.unit}, have {available}"
+                            ),
+                            code="insufficient_material",
+                        )
+                # All checks passed — deduct
+                for req in size_reqs:
+                    deduction = -(Decimal(str(diff)) * req.quantity_per_item)
+                    await create_stock_movement(
+                        db, req.material_id, deduction,
+                        StockMovementReason.production_usage, admin_user_id,
+                    )
 
     for k, v in kwargs.items():
         if v is not None:
@@ -267,36 +285,52 @@ async def delete_product_material(db: AsyncSession, pm_id: int) -> None:
     await db.flush()
 
 
-# ── Variant Material Requirements ───────────────────────
+# ── Product Size Material Requirements ──────────────────
+# Each row = which material, which size, how much per finished item.
+# Used to auto-deduct inventory when a variant's stock_quantity rises.
 
-async def list_variant_requirements(db: AsyncSession, variant_id: int) -> list[VariantMaterialRequirement]:
+async def list_product_size_requirements(
+    db: AsyncSession, product_id: int
+) -> list[ProductSizeMaterialRequirement]:
     result = await db.execute(
-        select(VariantMaterialRequirement).where(VariantMaterialRequirement.variant_id == variant_id)
+        select(ProductSizeMaterialRequirement)
+        .where(ProductSizeMaterialRequirement.product_id == product_id)
+        .order_by(ProductSizeMaterialRequirement.size, ProductSizeMaterialRequirement.material_id)
     )
     return list(result.scalars().all())
 
 
-async def add_variant_requirement(
-    db: AsyncSession, variant_id: int, material_id: int, quantity_per_item: Decimal
-) -> VariantMaterialRequirement:
+async def add_product_size_requirement(
+    db: AsyncSession, product_id: int, material_id: int, size: str, quantity_per_item: Decimal
+) -> ProductSizeMaterialRequirement:
     existing = await db.execute(
-        select(VariantMaterialRequirement).where(
-            VariantMaterialRequirement.variant_id == variant_id,
-            VariantMaterialRequirement.material_id == material_id,
+        select(ProductSizeMaterialRequirement).where(
+            ProductSizeMaterialRequirement.product_id == product_id,
+            ProductSizeMaterialRequirement.material_id == material_id,
+            ProductSizeMaterialRequirement.size == size,
         )
     )
     if existing.scalar_one_or_none():
-        raise ConflictException(detail="Material requirement already exists for this variant")
+        raise ConflictException(detail=f"Requirement for this material+size already exists")
 
-    req = VariantMaterialRequirement(variant_id=variant_id, material_id=material_id, quantity_per_item=quantity_per_item)
+    req = ProductSizeMaterialRequirement(
+        product_id=product_id,
+        material_id=material_id,
+        size=size,
+        quantity_per_item=quantity_per_item,
+    )
     db.add(req)
     await db.flush()
     await db.refresh(req)
     return req
 
 
-async def update_variant_requirement(db: AsyncSession, req_id: int, quantity_per_item: Decimal) -> VariantMaterialRequirement:
-    result = await db.execute(select(VariantMaterialRequirement).where(VariantMaterialRequirement.id == req_id))
+async def update_product_size_requirement(
+    db: AsyncSession, req_id: int, quantity_per_item: Decimal
+) -> ProductSizeMaterialRequirement:
+    result = await db.execute(
+        select(ProductSizeMaterialRequirement).where(ProductSizeMaterialRequirement.id == req_id)
+    )
     req = result.scalar_one_or_none()
     if not req:
         raise NotFoundException(detail=f"Requirement {req_id} not found")
@@ -306,8 +340,10 @@ async def update_variant_requirement(db: AsyncSession, req_id: int, quantity_per
     return req
 
 
-async def delete_variant_requirement(db: AsyncSession, req_id: int) -> None:
-    result = await db.execute(select(VariantMaterialRequirement).where(VariantMaterialRequirement.id == req_id))
+async def delete_product_size_requirement(db: AsyncSession, req_id: int) -> None:
+    result = await db.execute(
+        select(ProductSizeMaterialRequirement).where(ProductSizeMaterialRequirement.id == req_id)
+    )
     req = result.scalar_one_or_none()
     if not req:
         raise NotFoundException(detail=f"Requirement {req_id} not found")

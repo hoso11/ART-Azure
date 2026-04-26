@@ -206,49 +206,66 @@ async def delete_variant(
     await service.delete_variant(db, variant_id)
 
 
-# ── Variant Material Requirements ───────────────────────
+# ── Product Size Material Requirements ──────────────────
+# Each row: which material + which size + qty per finished item.
+# GET /products/{product_id}/size-requirements   → list all for the product
+# POST /products/{product_id}/size-requirements  → add row
+# PATCH /products/{product_id}/size-requirements/{req_id} → update qty
+# DELETE /products/{product_id}/size-requirements/{req_id}
 
-@router.get("/variants/{variant_id}/materials", response_model=list[schemas.VariantMaterialRequirementResponse])
-async def list_variant_materials(
-    variant_id: int,
+@router.get(
+    "/{product_id}/size-requirements",
+    response_model=list[schemas.ProductSizeMaterialRequirementResponse],
+)
+async def list_size_requirements(
+    product_id: int,
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ):
-    reqs = await service.list_variant_requirements(db, variant_id)
-    return [schemas.VariantMaterialRequirementResponse.model_validate(r) for r in reqs]
+    reqs = await service.list_product_size_requirements(db, product_id)
+    return [schemas.ProductSizeMaterialRequirementResponse.model_validate(r) for r in reqs]
 
 
-@router.post("/variants/{variant_id}/materials", response_model=schemas.VariantMaterialRequirementResponse, status_code=201)
-async def add_variant_material(
-    variant_id: int,
-    data: schemas.VariantMaterialRequirementCreate,
+@router.post(
+    "/{product_id}/size-requirements",
+    response_model=schemas.ProductSizeMaterialRequirementResponse,
+    status_code=201,
+)
+async def add_size_requirement(
+    product_id: int,
+    data: schemas.ProductSizeMaterialRequirementCreate,
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ):
-    req = await service.add_variant_requirement(db, variant_id, data.material_id, data.quantity_per_item)
-    return schemas.VariantMaterialRequirementResponse.model_validate(req)
+    req = await service.add_product_size_requirement(
+        db, product_id, data.material_id, data.size, data.quantity_per_item
+    )
+    return schemas.ProductSizeMaterialRequirementResponse.model_validate(req)
 
 
-@router.patch("/variants/{variant_id}/materials/{req_id}", response_model=schemas.VariantMaterialRequirementResponse)
-async def update_variant_material(
-    variant_id: int,
+@router.patch(
+    "/{product_id}/size-requirements/{req_id}",
+    response_model=schemas.ProductSizeMaterialRequirementResponse,
+)
+async def update_size_requirement(
+    product_id: int,
     req_id: int,
-    data: schemas.VariantMaterialRequirementUpdate,
+    data: schemas.ProductSizeMaterialRequirementUpdate,
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ):
-    req = await service.update_variant_requirement(db, req_id, data.quantity_per_item)
-    return schemas.VariantMaterialRequirementResponse.model_validate(req)
+    req = await service.update_product_size_requirement(db, req_id, data.quantity_per_item)
+    return schemas.ProductSizeMaterialRequirementResponse.model_validate(req)
 
 
-@router.delete("/variants/{variant_id}/materials/{req_id}", status_code=204)
-async def delete_variant_material(
-    variant_id: int,
+@router.delete("/{product_id}/size-requirements/{req_id}", status_code=204)
+async def delete_size_requirement(
+    product_id: int,
     req_id: int,
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ):
-    await service.delete_variant_requirement(db, req_id)
+    await service.delete_product_size_requirement(db, req_id)
 
 
 # ── Images ──────────────────────────────────────────────

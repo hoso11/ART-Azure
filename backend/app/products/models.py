@@ -31,6 +31,10 @@ class Product(Base):
     variants = relationship("ProductVariant", back_populates="product", lazy="selectin", cascade="all, delete-orphan")
     images = relationship("ProductImage", back_populates="product", lazy="selectin", cascade="all, delete-orphan")
     materials = relationship("ProductMaterial", back_populates="product", lazy="selectin", cascade="all, delete-orphan")
+    size_material_requirements = relationship(
+        "ProductSizeMaterialRequirement", back_populates="product",
+        lazy="selectin", cascade="all, delete-orphan",
+    )
 
 
 class ProductVariant(Base):
@@ -44,10 +48,6 @@ class ProductVariant(Base):
     stock_quantity: Mapped[int] = mapped_column(Integer, default=0)
 
     product = relationship("Product", back_populates="variants")
-    material_requirements = relationship(
-        "VariantMaterialRequirement", back_populates="variant",
-        lazy="selectin", cascade="all, delete-orphan",
-    )
 
 
 class ProductImage(Base):
@@ -75,13 +75,21 @@ class ProductMaterial(Base):
     material = relationship("Material", lazy="selectin")
 
 
-class VariantMaterialRequirement(Base):
-    __tablename__ = "variant_material_requirements"
+class ProductSizeMaterialRequirement(Base):
+    """Per-product, per-size material requirement.
+
+    Stores how much of a given material is needed to produce ONE item
+    of a specific size. When a variant's stock_quantity increases by N,
+    the system looks up requirements matching (product_id, variant.size)
+    and deducts N * quantity_per_item from inventory for each material.
+    """
+    __tablename__ = "product_size_material_requirements"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    variant_id: Mapped[int] = mapped_column(Integer, ForeignKey("product_variants.id"), nullable=False)
+    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id"), nullable=False)
     material_id: Mapped[int] = mapped_column(Integer, ForeignKey("materials.id"), nullable=False)
+    size: Mapped[str] = mapped_column(String(50), nullable=False)
     quantity_per_item: Mapped[Decimal] = mapped_column(Numeric(10, 3), nullable=False)
 
-    variant = relationship("ProductVariant", back_populates="material_requirements")
+    product = relationship("Product", back_populates="size_material_requirements")
     material = relationship("Material", lazy="selectin")

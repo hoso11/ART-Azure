@@ -2,10 +2,12 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { ProductVariant, Material, VariantMaterialRequirement } from "@/types";
+import { ProductVariant, Material, ProductSizeMaterialRequirement } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { FormField, Input } from "@/components/ui/FormField";
 import { formatCurrency } from "@/lib/utils";
+
+// ── Variant form (add / edit) ─────────────────────────
 
 function VariantForm({
   productId,
@@ -30,26 +32,19 @@ function VariantForm({
     e.preventDefault();
     setLoading(true);
     setError("");
-
     const url = isEdit
       ? `/api/v1/products/variants/${variant.id}`
       : `/api/v1/products/${productId}/variants`;
-
     try {
       const res = await fetch(url, {
         method: isEdit ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({
-          size,
-          color,
-          price: parseFloat(price),
-          stock_quantity: parseInt(stock),
-        }),
+        body: JSON.stringify({ size, color, price: parseFloat(price), stock_quantity: parseInt(stock) }),
       });
       if (!res.ok) {
-        const data = await res.json();
-        setError(data.detail || "Failed to save variant");
+        const d = await res.json();
+        setError(d.detail || "Failed to save variant");
         return;
       }
       onClose();
@@ -89,83 +84,99 @@ function VariantForm({
   );
 }
 
-// ── Material requirements inline panel ───────────────────
+// ── Material requirements row (inline edit) ───────────
 
 function RequirementRow({
   req,
-  onUpdateQty,
+  onSave,
   onDelete,
 }: {
-  req: VariantMaterialRequirement;
-  onUpdateQty: (reqId: number, variantId: number, qty: string) => void;
-  onDelete: (reqId: number, variantId: number) => void;
+  req: ProductSizeMaterialRequirement;
+  onSave: (reqId: number, qty: string) => void;
+  onDelete: (reqId: number) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [qty, setQty] = useState(req.quantity_per_item.toString());
 
   return (
-    <div className="flex items-center gap-3 text-xs py-1">
-      <span className="flex-1 font-medium text-gray-700">
-        {req.material?.name || `Material #${req.material_id}`}
-      </span>
-      {editing ? (
-        <>
+    <tr className="hover:bg-gray-50">
+      <td className="px-4 py-2 text-sm">{req.material?.name ?? `#${req.material_id}`}</td>
+      <td className="px-4 py-2 text-sm">{req.size}</td>
+      <td className="px-4 py-2 text-sm">
+        {editing ? (
           <input
             type="number"
             step="0.001"
             min="0.001"
             value={qty}
             onChange={(e) => setQty(e.target.value)}
-            className="w-20 border border-gray-300 rounded px-1.5 py-0.5 text-xs"
+            className="w-24 border border-gray-300 rounded px-1.5 py-0.5 text-sm"
             autoFocus
           />
-          <span className="text-gray-400">{req.material?.unit || ""}</span>
-          <button
-            onClick={() => { onUpdateQty(req.id, req.variant_id, qty); setEditing(false); }}
-            className="text-brand-700 hover:text-brand-900 font-medium"
-          >
-            Save
-          </button>
-          <button
-            onClick={() => { setEditing(false); setQty(req.quantity_per_item.toString()); }}
-            className="text-gray-400 hover:text-gray-600"
-          >
-            Cancel
-          </button>
-        </>
-      ) : (
-        <>
-          <span className="text-gray-500">
-            {req.quantity_per_item} {req.material?.unit || ""}
+        ) : (
+          req.quantity_per_item
+        )}
+      </td>
+      <td className="px-4 py-2 text-sm text-gray-500">{req.material?.unit ?? ""}</td>
+      <td className="px-4 py-2 text-right">
+        {editing ? (
+          <span className="flex items-center gap-2 justify-end text-xs">
+            <button
+              onClick={() => { onSave(req.id, qty); setEditing(false); }}
+              className="text-brand-700 font-medium hover:text-brand-900"
+            >
+              Save
+            </button>
+            <button
+              onClick={() => { setEditing(false); setQty(req.quantity_per_item.toString()); }}
+              className="text-gray-400 hover:text-gray-600"
+            >
+              Cancel
+            </button>
           </span>
-          <button onClick={() => setEditing(true)} className="text-gray-400 hover:text-brand-700" title="Edit">
-            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
-            </svg>
-          </button>
-          <button onClick={() => onDelete(req.id, req.variant_id)} className="text-gray-400 hover:text-red-600" title="Remove">
-            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </>
-      )}
-    </div>
+        ) : (
+          <span className="flex items-center gap-2 justify-end">
+            <button onClick={() => setEditing(true)} className="text-gray-400 hover:text-brand-700" title="Edit">
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
+              </svg>
+            </button>
+            <button onClick={() => onDelete(req.id)} className="text-gray-400 hover:text-red-600" title="Delete">
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+              </svg>
+            </button>
+          </span>
+        )}
+      </td>
+    </tr>
   );
 }
 
-function VariantMaterialPanel({ variantId }: { variantId: number }) {
-  const [requirements, setRequirements] = useState<VariantMaterialRequirement[]>([]);
+// ── Product-level material requirements panel ─────────
+// Columns: Material (Նyut) | Size (Չafss) | Qty/item | Unit | Actions
+
+function ProductMaterialRequirementsPanel({
+  productId,
+  variantSizes,
+}: {
+  productId: number;
+  variantSizes: string[];
+}) {
+  const [requirements, setRequirements] = useState<ProductSizeMaterialRequirement[]>([]);
   const [materials, setMaterials] = useState<Material[]>([]);
   const [loading, setLoading] = useState(true);
   const [addMaterialId, setAddMaterialId] = useState("");
+  const [addSize, setAddSize] = useState("");
   const [addQty, setAddQty] = useState("1");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  const selectedMaterial = materials.find((m) => m.id === parseInt(addMaterialId));
+
   useEffect(() => {
     Promise.all([
-      fetch(`/api/v1/products/variants/${variantId}/materials`, { credentials: "include" }).then((r) => r.json()),
+      fetch(`/api/v1/products/${productId}/size-requirements`, { credentials: "include" }).then((r) => r.json()),
       fetch(`/api/v1/inventory/materials?limit=100`, { credentials: "include" }).then((r) => r.json()),
     ])
       .then(([reqs, mats]) => {
@@ -174,23 +185,30 @@ function VariantMaterialPanel({ variantId }: { variantId: number }) {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [variantId]);
+  }, [productId]);
 
   const handleAdd = async () => {
-    if (!addMaterialId || !addQty) return;
+    if (!addMaterialId || !addSize || !addQty) return;
     setSaving(true);
     setError("");
     try {
-      const res = await fetch(`/api/v1/products/variants/${variantId}/materials`, {
+      const res = await fetch(`/api/v1/products/${productId}/size-requirements`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ material_id: parseInt(addMaterialId), quantity_per_item: parseFloat(addQty) }),
+        body: JSON.stringify({
+          material_id: parseInt(addMaterialId),
+          size: addSize,
+          quantity_per_item: parseFloat(addQty),
+        }),
       });
       if (res.ok) {
-        const newReq: VariantMaterialRequirement = await res.json();
-        setRequirements((prev) => [...prev, newReq]);
+        const newReq: ProductSizeMaterialRequirement = await res.json();
+        setRequirements((prev) =>
+          [...prev, newReq].sort((a, b) => a.size.localeCompare(b.size) || (a.material?.name ?? "").localeCompare(b.material?.name ?? ""))
+        );
         setAddMaterialId("");
+        setAddSize("");
         setAddQty("1");
       } else {
         const d = await res.json();
@@ -203,23 +221,25 @@ function VariantMaterialPanel({ variantId }: { variantId: number }) {
     }
   };
 
-  const handleUpdateQty = async (reqId: number, varId: number, qty: string) => {
+  const handleSave = async (reqId: number, qty: string) => {
     const parsed = parseFloat(qty);
     if (isNaN(parsed) || parsed <= 0) return;
-    const res = await fetch(`/api/v1/products/variants/${varId}/materials/${reqId}`, {
+    const req = requirements.find((r) => r.id === reqId);
+    if (!req) return;
+    const res = await fetch(`/api/v1/products/${productId}/size-requirements/${reqId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify({ quantity_per_item: parsed }),
     });
     if (res.ok) {
-      const updated: VariantMaterialRequirement = await res.json();
+      const updated: ProductSizeMaterialRequirement = await res.json();
       setRequirements((prev) => prev.map((r) => (r.id === reqId ? updated : r)));
     }
   };
 
-  const handleDelete = async (reqId: number, varId: number) => {
-    const res = await fetch(`/api/v1/products/variants/${varId}/materials/${reqId}`, {
+  const handleDelete = async (reqId: number) => {
+    const res = await fetch(`/api/v1/products/${productId}/size-requirements/${reqId}`, {
       method: "DELETE",
       credentials: "include",
     });
@@ -228,67 +248,111 @@ function VariantMaterialPanel({ variantId }: { variantId: number }) {
     }
   };
 
-  const availableMaterials = materials.filter((m) => !requirements.find((r) => r.material_id === m.id));
-
   return (
-    <div className="px-6 py-4 bg-brand-50 border-t border-brand-100">
-      <h5 className="text-xs font-semibold text-gray-700 mb-2">
-        Nyut&apos;akan pahanjner{" "}
-        <span className="font-normal text-gray-400">(qty/item — deducted from inventory on stock increase)</span>
-      </h5>
+    <div className="mt-6 pt-5 border-t border-gray-200">
+      <h3 className="font-semibold text-gray-900 mb-3">Nyut&apos;akan pahanjner / Material Requirements</h3>
+      <p className="text-xs text-gray-400 mb-3">
+        Defines how much of each material is consumed per finished item per size.
+        Inventory is auto-deducted when variant stock is increased.
+      </p>
 
       {loading ? (
-        <p className="text-xs text-gray-400">Loading...</p>
+        <p className="text-sm text-gray-400">Loading...</p>
       ) : (
         <>
-          {error && <p className="text-xs text-red-600 mb-2">{error}</p>}
+          <div className="overflow-x-auto rounded-lg border border-gray-200">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Nyut / Material</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Chafss / Size</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Qty / item</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Unit</th>
+                  <th className="px-4 py-2 w-20"></th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-100">
+                {requirements.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-6 text-center text-sm text-gray-400">
+                      Pahanjner chkan — avelee nakhkin sharan
+                    </td>
+                  </tr>
+                ) : (
+                  requirements.map((req) => (
+                    <RequirementRow key={req.id} req={req} onSave={handleSave} onDelete={handleDelete} />
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
 
-          {requirements.length === 0 ? (
-            <p className="text-xs text-gray-400 mb-3">Voch mi nyut ch&apos;e nshvats</p>
-          ) : (
-            <div className="divide-y divide-brand-100 mb-3">
-              {requirements.map((req) => (
-                <RequirementRow
-                  key={req.id}
-                  req={req}
-                  onUpdateQty={handleUpdateQty}
-                  onDelete={handleDelete}
-                />
-              ))}
-            </div>
-          )}
-
-          {availableMaterials.length > 0 && (
-            <div className="flex gap-2 items-center flex-wrap pt-2">
+          {/* Add row form */}
+          <div className="mt-3 flex flex-wrap gap-2 items-end">
+            {/* Material select — only from existing inventory */}
+            <div className="flex flex-col gap-1 flex-1 min-w-[180px]">
+              <label className="text-xs text-gray-500 font-medium">Nyut (Material)</label>
               <select
                 value={addMaterialId}
                 onChange={(e) => setAddMaterialId(e.target.value)}
-                className="flex-1 min-w-[160px] text-xs border border-gray-300 rounded-md px-2 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
+                className="text-sm border border-gray-300 rounded-md px-2 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
               >
                 <option value="">Entrel nyut...</option>
-                {availableMaterials.map((m) => (
+                {materials.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.name} ({m.unit}){m.inventory ? ` — ${m.inventory.quantity_on_hand} on hand` : ""}
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* Size select — from existing variant sizes */}
+            <div className="flex flex-col gap-1 min-w-[120px]">
+              <label className="text-xs text-gray-500 font-medium">Chafss (Size)</label>
+              <select
+                value={addSize}
+                onChange={(e) => setAddSize(e.target.value)}
+                className="text-sm border border-gray-300 rounded-md px-2 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
+              >
+                <option value="">Entrel chafss...</option>
+                {variantSizes.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Qty/item */}
+            <div className="flex flex-col gap-1 w-28">
+              <label className="text-xs text-gray-500 font-medium">
+                Qty/item{selectedMaterial ? ` (${selectedMaterial.unit})` : ""}
+              </label>
               <input
                 type="number"
                 step="0.001"
                 min="0.001"
                 value={addQty}
                 onChange={(e) => setAddQty(e.target.value)}
-                className="w-24 text-xs border border-gray-300 rounded-md px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                placeholder="qty/item"
+                className="text-sm border border-gray-300 rounded-md px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-brand-500"
               />
+            </div>
+
+            <div className="flex flex-col justify-end">
               <button
                 onClick={handleAdd}
-                disabled={saving || !addMaterialId || !addQty}
-                className="text-xs px-3 py-1.5 bg-brand-800 text-white rounded-md hover:bg-brand-900 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={saving || !addMaterialId || !addSize || !addQty}
+                className="text-sm px-4 py-1.5 bg-brand-800 text-white rounded-md hover:bg-brand-900 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {saving ? "..." : "+ Add"}
+                {saving ? "..." : "+ Avelee"}
               </button>
             </div>
+          </div>
+
+          {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+
+          {variantSizes.length === 0 && (
+            <p className="text-xs text-amber-600 mt-2">
+              Create at least one variant first — sizes come from existing variants.
+            </p>
           )}
         </>
       )}
@@ -304,7 +368,8 @@ export function VariantManager({ productId, variants }: { productId: number; var
   const [editId, setEditId] = useState<number | null>(null);
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [materialsId, setMaterialsId] = useState<number | null>(null);
+
+  const variantSizes = [...new Set(variants.map((v) => v.size))].sort();
 
   const handleDelete = async (variantId: number) => {
     setDeleting(true);
@@ -330,7 +395,7 @@ export function VariantManager({ productId, variants }: { productId: number; var
         <h3 className="font-semibold">Tarberakat-ner</h3>
         <button
           type="button"
-          onClick={() => { setShowAdd(true); setEditId(null); setMaterialsId(null); }}
+          onClick={() => { setShowAdd(true); setEditId(null); }}
           className="text-xs font-medium text-brand-700 hover:text-brand-900"
         >
           + Add Variant
@@ -338,12 +403,12 @@ export function VariantManager({ productId, variants }: { productId: number; var
       </div>
 
       {showAdd && (
-        <div className="px-4 pt-4">
+        <div className="pt-4">
           <VariantForm productId={productId} onClose={() => setShowAdd(false)} />
         </div>
       )}
 
-      <div className="p-0">
+      <div className="mt-2">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
@@ -351,7 +416,7 @@ export function VariantManager({ productId, variants }: { productId: number; var
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Guyyn</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Gin</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Mnatsord</th>
-              <th className="px-6 py-3 w-32"></th>
+              <th className="px-6 py-3 w-24"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200">
@@ -360,7 +425,7 @@ export function VariantManager({ productId, variants }: { productId: number; var
             )}
             {variants.map((v) => (
               <React.Fragment key={v.id}>
-                <tr className={materialsId === v.id ? "bg-brand-50/40" : ""}>
+                <tr>
                   {editId === v.id ? (
                     <td colSpan={5} className="p-4">
                       <VariantForm productId={productId} variant={v} onClose={() => setEditId(null)} />
@@ -373,31 +438,22 @@ export function VariantManager({ productId, variants }: { productId: number; var
                       <td className="px-6 py-4 text-sm">{v.stock_quantity}</td>
                       <td className="px-6 py-4 text-right">
                         {deleteId === v.id ? (
-                          <span className="flex items-center gap-1 justify-end">
+                          <span className="flex items-center gap-1 justify-end text-xs">
                             <button
                               onClick={() => handleDelete(v.id)}
                               disabled={deleting}
-                              className="text-xs text-red-600 font-medium hover:text-red-800 disabled:opacity-50"
+                              className="text-red-600 font-medium hover:text-red-800 disabled:opacity-50"
                             >
                               {deleting ? "..." : "Confirm"}
                             </button>
-                            <button onClick={() => setDeleteId(null)} className="text-xs text-gray-500 hover:text-gray-700">
+                            <button onClick={() => setDeleteId(null)} className="text-gray-500 hover:text-gray-700">
                               Cancel
                             </button>
                           </span>
                         ) : (
                           <span className="flex items-center gap-2 justify-end">
                             <button
-                              onClick={() => setMaterialsId(materialsId === v.id ? null : v.id)}
-                              className={materialsId === v.id ? "text-brand-700" : "text-gray-400 hover:text-brand-600"}
-                              title="Material Requirements"
-                            >
-                              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
-                              </svg>
-                            </button>
-                            <button
-                              onClick={() => { setEditId(v.id); setShowAdd(false); setMaterialsId(null); }}
+                              onClick={() => { setEditId(v.id); setShowAdd(false); }}
                               className="text-gray-400 hover:text-brand-700"
                               title="Edit"
                             >
@@ -420,18 +476,14 @@ export function VariantManager({ productId, variants }: { productId: number; var
                     </>
                   )}
                 </tr>
-                {materialsId === v.id && (
-                  <tr>
-                    <td colSpan={5} className="p-0">
-                      <VariantMaterialPanel variantId={v.id} />
-                    </td>
-                  </tr>
-                )}
               </React.Fragment>
             ))}
           </tbody>
         </table>
       </div>
+
+      {/* Product-level material requirements — one table for all sizes */}
+      <ProductMaterialRequirementsPanel productId={productId} variantSizes={variantSizes} />
     </>
   );
 }
