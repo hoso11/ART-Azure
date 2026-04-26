@@ -369,7 +369,7 @@ export function VariantManager({ productId, variants }: { productId: number; var
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const variantSizes = [...new Set(variants.map((v) => v.size))].sort();
+  const variantSizes = Array.from(new Set(variants.map((v) => v.size))).sort();
 
   const handleDelete = async (variantId: number) => {
     setDeleting(true);
