@@ -44,6 +44,10 @@ class ProductVariant(Base):
     stock_quantity: Mapped[int] = mapped_column(Integer, default=0)
 
     product = relationship("Product", back_populates="variants")
+    material_requirements = relationship(
+        "VariantMaterialRequirement", back_populates="variant",
+        lazy="selectin", cascade="all, delete-orphan",
+    )
 
 
 class ProductImage(Base):
@@ -68,4 +72,16 @@ class ProductMaterial(Base):
     unit: Mapped[str] = mapped_column(String(50), nullable=False)
 
     product = relationship("Product", back_populates="materials")
+    material = relationship("Material", lazy="selectin")
+
+
+class VariantMaterialRequirement(Base):
+    __tablename__ = "variant_material_requirements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    variant_id: Mapped[int] = mapped_column(Integer, ForeignKey("product_variants.id"), nullable=False)
+    material_id: Mapped[int] = mapped_column(Integer, ForeignKey("materials.id"), nullable=False)
+    quantity_per_item: Mapped[Decimal] = mapped_column(Numeric(10, 3), nullable=False)
+
+    variant = relationship("ProductVariant", back_populates="material_requirements")
     material = relationship("Material", lazy="selectin")

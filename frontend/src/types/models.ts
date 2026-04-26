@@ -134,3 +134,15 @@ export interface StockMovement {
   created_by: number;
   created_at: string;
 }
+
+export interface VariantMaterialRequirement {
+  id: number;
+  variant_id: number;
+  material_id: number;
+  quantity_per_item: number;
+  material: {
+    id: number;
+    name: string;
+    unit: string;
+  } | null;
+}

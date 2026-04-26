@@ -1,9 +1,10 @@
+from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
-from app.products.models import Product, ProductVariant, ProductCategory, ProductImage, ProductMaterial
-from app.exceptions import NotFoundException, ConflictException
+from app.products.models import Product, ProductVariant, ProductCategory, ProductImage, ProductMaterial, VariantMaterialRequirement
+from app.exceptions import NotFoundException, ConflictException, ValidationException
 
 
 # ── Categories ──────────────────────────────────────────
@@ -151,11 +152,39 @@ async def create_variant(db: AsyncSession, product_id: int, **kwargs) -> Product
     return variant
 
 
-async def update_variant(db: AsyncSession, variant_id: int, **kwargs) -> ProductVariant:
-    result = await db.execute(select(ProductVariant).where(ProductVariant.id == variant_id))
+async def update_variant(db: AsyncSession, variant_id: int, admin_user_id: int = 0, **kwargs) -> ProductVariant:
+    from app.inventory.service import get_material_by_id, create_stock_movement
+    from app.inventory.models import StockMovementReason
+
+    result = await db.execute(
+        select(ProductVariant)
+        .options(selectinload(ProductVariant.material_requirements))
+        .where(ProductVariant.id == variant_id)
+    )
     variant = result.scalar_one_or_none()
     if not variant:
         raise NotFoundException(detail=f"Variant {variant_id} not found")
+
+    new_stock = kwargs.get("stock_quantity")
+    if new_stock is not None and variant.material_requirements:
+        diff = int(new_stock) - int(variant.stock_quantity)
+        if diff > 0:
+            for req in variant.material_requirements:
+                material = await get_material_by_id(db, req.material_id)
+                needed = Decimal(str(diff)) * req.quantity_per_item
+                available = material.inventory.quantity_on_hand if material.inventory else Decimal("0")
+                if available < needed:
+                    raise ValidationException(
+                        detail=f"Insufficient stock for '{material.name}': need {needed} {material.unit}, have {available}",
+                        code="insufficient_material",
+                    )
+            for req in variant.material_requirements:
+                deduction = -(Decimal(str(diff)) * req.quantity_per_item)
+                await create_stock_movement(
+                    db, req.material_id, deduction,
+                    StockMovementReason.production_usage, admin_user_id,
+                )
+
     for k, v in kwargs.items():
         if v is not None:
             setattr(variant, k, v)
@@ -235,4 +264,52 @@ async def delete_product_material(db: AsyncSession, pm_id: int) -> None:
     if not pm:
         raise NotFoundException(detail=f"ProductMaterial {pm_id} not found")
     await db.delete(pm)
+    await db.flush()
+
+
+# ── Variant Material Requirements ───────────────────────
+
+async def list_variant_requirements(db: AsyncSession, variant_id: int) -> list[VariantMaterialRequirement]:
+    result = await db.execute(
+        select(VariantMaterialRequirement).where(VariantMaterialRequirement.variant_id == variant_id)
+    )
+    return list(result.scalars().all())
+
+
+async def add_variant_requirement(
+    db: AsyncSession, variant_id: int, material_id: int, quantity_per_item: Decimal
+) -> VariantMaterialRequirement:
+    existing = await db.execute(
+        select(VariantMaterialRequirement).where(
+            VariantMaterialRequirement.variant_id == variant_id,
+            VariantMaterialRequirement.material_id == material_id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise ConflictException(detail="Material requirement already exists for this variant")
+
+    req = VariantMaterialRequirement(variant_id=variant_id, material_id=material_id, quantity_per_item=quantity_per_item)
+    db.add(req)
+    await db.flush()
+    await db.refresh(req)
+    return req
+
+
+async def update_variant_requirement(db: AsyncSession, req_id: int, quantity_per_item: Decimal) -> VariantMaterialRequirement:
+    result = await db.execute(select(VariantMaterialRequirement).where(VariantMaterialRequirement.id == req_id))
+    req = result.scalar_one_or_none()
+    if not req:
+        raise NotFoundException(detail=f"Requirement {req_id} not found")
+    req.quantity_per_item = quantity_per_item
+    await db.flush()
+    await db.refresh(req)
+    return req
+
+
+async def delete_variant_requirement(db: AsyncSession, req_id: int) -> None:
+    result = await db.execute(select(VariantMaterialRequirement).where(VariantMaterialRequirement.id == req_id))
+    req = result.scalar_one_or_none()
+    if not req:
+        raise NotFoundException(detail=f"Requirement {req_id} not found")
+    await db.delete(req)
     await db.flush()

@@ -193,7 +193,7 @@ async def update_variant(
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ):
-    variant = await service.update_variant(db, variant_id, **data.model_dump(exclude_unset=True))
+    variant = await service.update_variant(db, variant_id, admin_user_id=_admin.id, **data.model_dump(exclude_unset=True))
     return schemas.VariantResponse.model_validate(variant)
 
 
@@ -204,6 +204,51 @@ async def delete_variant(
     _admin: User = Depends(require_admin),
 ):
     await service.delete_variant(db, variant_id)
+
+
+# ── Variant Material Requirements ───────────────────────
+
+@router.get("/variants/{variant_id}/materials", response_model=list[schemas.VariantMaterialRequirementResponse])
+async def list_variant_materials(
+    variant_id: int,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    reqs = await service.list_variant_requirements(db, variant_id)
+    return [schemas.VariantMaterialRequirementResponse.model_validate(r) for r in reqs]
+
+
+@router.post("/variants/{variant_id}/materials", response_model=schemas.VariantMaterialRequirementResponse, status_code=201)
+async def add_variant_material(
+    variant_id: int,
+    data: schemas.VariantMaterialRequirementCreate,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    req = await service.add_variant_requirement(db, variant_id, data.material_id, data.quantity_per_item)
+    return schemas.VariantMaterialRequirementResponse.model_validate(req)
+
+
+@router.patch("/variants/{variant_id}/materials/{req_id}", response_model=schemas.VariantMaterialRequirementResponse)
+async def update_variant_material(
+    variant_id: int,
+    req_id: int,
+    data: schemas.VariantMaterialRequirementUpdate,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    req = await service.update_variant_requirement(db, req_id, data.quantity_per_item)
+    return schemas.VariantMaterialRequirementResponse.model_validate(req)
+
+
+@router.delete("/variants/{variant_id}/materials/{req_id}", status_code=204)
+async def delete_variant_material(
+    variant_id: int,
+    req_id: int,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    await service.delete_variant_requirement(db, req_id)
 
 
 # ── Images ──────────────────────────────────────────────
