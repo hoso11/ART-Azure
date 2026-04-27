@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 import io
@@ -7,6 +7,7 @@ from app.database import get_db
 from app.dependencies import require_admin
 from app.reports import service
 from app.users.models import User
+from app.activity import service as activity_service
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
@@ -32,10 +33,17 @@ async def get_order_trends(
 
 @router.get("/export/orders")
 async def export_orders_csv(
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     csv_content = await service.generate_orders_csv(db)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="report.exported", entity_type="report",
+        details="orders (legacy CSV export)",
+        new_values={"report": "orders", "format": "csv"},
+    )
     return StreamingResponse(
         io.StringIO(csv_content),
         media_type="text/csv",
@@ -53,17 +61,38 @@ def _csv_response(content: str, filename: str) -> StreamingResponse:
     )
 
 
+async def _audit_report(
+    db: AsyncSession,
+    admin: User,
+    request: Request,
+    report: str,
+    format: str,
+    filters: dict | None = None,
+):
+    action = "report.exported" if format == "csv" else "report.generated"
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action=action, entity_type="report",
+        new_values={"report": report, "format": format, "filters": filters or {}},
+        details=report,
+    )
+
+
 @router.get("/orders")
 async def get_orders_report(
+    request: Request,
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
     status: str | None = Query(None),
     customer_id: int | None = Query(None),
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     data = await service.get_orders_report(db, start_date, end_date, status, customer_id)
+    await _audit_report(db, admin, request, "orders", format, {
+        "start_date": start_date, "end_date": end_date, "status": status, "customer_id": customer_id,
+    })
     if format == "csv":
         return _csv_response(service.orders_report_to_csv(data), "orders_report.csv")
     return data
@@ -71,13 +100,17 @@ async def get_orders_report(
 
 @router.get("/sales")
 async def get_sales_report(
+    request: Request,
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     data = await service.get_sales_report(db, start_date, end_date)
+    await _audit_report(db, admin, request, "sales", format, {
+        "start_date": start_date, "end_date": end_date,
+    })
     if format == "csv":
         return _csv_response(service.sales_report_to_csv(data), "sales_report.csv")
     return data
@@ -85,11 +118,13 @@ async def get_sales_report(
 
 @router.get("/inventory")
 async def get_inventory_report(
+    request: Request,
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     data = await service.get_inventory_report(db)
+    await _audit_report(db, admin, request, "inventory", format)
     if format == "csv":
         return _csv_response(service.inventory_report_to_csv(data), "inventory_report.csv")
     return data
@@ -97,14 +132,18 @@ async def get_inventory_report(
 
 @router.get("/material-consumption")
 async def get_material_consumption_report(
+    request: Request,
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
     material_id: int | None = Query(None),
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     data = await service.get_material_consumption_report(db, start_date, end_date, material_id)
+    await _audit_report(db, admin, request, "material_consumption", format, {
+        "start_date": start_date, "end_date": end_date, "material_id": material_id,
+    })
     if format == "csv":
         return _csv_response(service.material_consumption_to_csv(data), "material_consumption_report.csv")
     return data
@@ -112,14 +151,18 @@ async def get_material_consumption_report(
 
 @router.get("/production")
 async def get_production_report(
+    request: Request,
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
     stage: str | None = Query(None),
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     data = await service.get_production_report(db, start_date, end_date, stage)
+    await _audit_report(db, admin, request, "production", format, {
+        "start_date": start_date, "end_date": end_date, "stage": stage,
+    })
     if format == "csv":
         return _csv_response(service.production_report_to_csv(data), "production_report.csv")
     return data
@@ -127,11 +170,13 @@ async def get_production_report(
 
 @router.get("/low-stock")
 async def get_low_stock_report(
+    request: Request,
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     data = await service.get_low_stock_report(db)
+    await _audit_report(db, admin, request, "low_stock", format)
     if format == "csv":
         return _csv_response(service.low_stock_to_csv(data), "low_stock_report.csv")
     return data
@@ -139,11 +184,13 @@ async def get_low_stock_report(
 
 @router.get("/customer-discounts")
 async def get_customer_discount_report(
+    request: Request,
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     data = await service.get_customer_discount_report(db)
+    await _audit_report(db, admin, request, "customer_discounts", format)
     if format == "csv":
         return _csv_response(service.customer_discount_to_csv(data), "customer_discount_report.csv")
     return data

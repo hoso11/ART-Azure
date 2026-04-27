@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import require_admin
 from app.production import service, schemas
 from app.users.models import User
+from app.activity import service as activity_service
 
 router = APIRouter(prefix="/production", tags=["Production"])
 
@@ -51,6 +52,7 @@ async def get_production_summary(
 )
 async def create_production_batch(
     data: schemas.ProductionBatchCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
@@ -60,6 +62,18 @@ async def create_production_batch(
         variant_id=data.variant_id,
         quantity_to_produce=data.quantity_to_produce,
         created_by=admin.id,
+    )
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="production.batch_created", entity_type="production_batch", entity_id=batch.id,
+        new_values={
+            "product_id": batch.product_id,
+            "variant_id": batch.variant_id,
+            "quantity_to_produce": batch.quantity_to_produce,
+            "current_stage": batch.current_stage,
+            "stage_status": batch.stage_status,
+            "materials_deducted": batch.materials_deducted,
+        },
     )
     return schemas.ProductionBatchResponse.model_validate(batch)
 
@@ -90,15 +104,25 @@ async def list_production_batches(
 async def update_production_batch(
     batch_id: int,
     data: schemas.ProductionBatchUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
+    existing = await service.get_production_batch_by_id(db, batch_id)
+    old = {"current_stage": existing.current_stage, "stage_status": existing.stage_status}
     batch = await service.update_production_batch(
         db,
         batch_id,
         new_stage=data.current_stage,
         new_status=data.stage_status,
     )
+    new = {"current_stage": batch.current_stage, "stage_status": batch.stage_status}
+    if old != new:
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="production.batch_updated", entity_type="production_batch", entity_id=batch.id,
+            old_values=old, new_values=new,
+        )
     return schemas.ProductionBatchResponse.model_validate(batch)
 
 
@@ -108,10 +132,25 @@ async def update_production_batch(
 )
 async def complete_production_batch(
     batch_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
+    existing = await service.get_production_batch_by_id(db, batch_id)
+    already_done = existing.stock_added
     batch = await service.complete_production_batch(db, batch_id)
+    if not already_done and batch.stock_added:
+        # Only audit the actual completion — idempotent re-calls are silent.
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="production.batch_completed", entity_type="production_batch", entity_id=batch.id,
+            new_values={
+                "stock_added": True,
+                "quantity_added_to_variant": batch.quantity_to_produce,
+                "variant_id": batch.variant_id,
+            },
+            details=f"Completed batch #{batch.id}, +{batch.quantity_to_produce} to variant #{batch.variant_id}",
+        )
     return schemas.ProductionBatchResponse.model_validate(batch)
 
 
@@ -141,10 +180,21 @@ async def create_stages_for_order(
 async def update_stage(
     stage_id: int,
     data: schemas.ProductionStageUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
+    existing = await service.get_stage_by_id(db, stage_id)
+    old_status = existing.status.value if hasattr(existing.status, "value") else existing.status
     stage = await service.update_stage(db, stage_id, changed_by=admin.id, **data.model_dump(exclude_unset=True))
+    new_status = stage.status.value if hasattr(stage.status, "value") else stage.status
+    if old_status != new_status:
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="production.stage_updated", entity_type="production_stage", entity_id=stage.id,
+            old_values={"status": old_status},
+            new_values={"status": new_status},
+        )
     return schemas.ProductionStageResponse.model_validate(stage)
 
 
@@ -152,10 +202,21 @@ async def update_stage(
 async def set_stage_status(
     stage_id: int,
     data: schemas.StageStatusUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
+    existing = await service.get_stage_by_id(db, stage_id)
+    old_status = existing.status.value if hasattr(existing.status, "value") else existing.status
     stage = await service.update_stage_status(
         db, stage_id, new_status=data.status, changed_by=admin.id, note=data.note
+    )
+    new_status = stage.status.value if hasattr(stage.status, "value") else stage.status
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="production.stage_status_changed", entity_type="production_stage", entity_id=stage.id,
+        old_values={"status": old_status},
+        new_values={"status": new_status},
+        details=data.note,
     )
     return schemas.ProductionStageResponse.model_validate(stage)

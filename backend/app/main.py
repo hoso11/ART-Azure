@@ -59,6 +59,7 @@ from app.orders.router import router as orders_router
 from app.production.router import router as production_router
 from app.inventory.router import router as inventory_router
 from app.reports.router import router as reports_router
+from app.activity.router import router as activity_router
 
 API_PREFIX = "/api/v1"
 
@@ -71,6 +72,7 @@ app.include_router(orders_router, prefix=API_PREFIX)
 app.include_router(production_router, prefix=API_PREFIX)
 app.include_router(inventory_router, prefix=API_PREFIX)
 app.include_router(reports_router, prefix=API_PREFIX)
+app.include_router(activity_router, prefix=API_PREFIX)
 
 
 # ── Health Checks ───────────────────────────────────────

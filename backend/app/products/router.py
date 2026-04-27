@@ -1,6 +1,6 @@
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
-from fastapi import APIRouter, Depends, Query, UploadFile, File
+from fastapi import APIRouter, Depends, Query, Request, UploadFile, File
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +13,26 @@ from app.products.schemas import CategoryCreate, CategoryUpdate, CategoryRespons
 from app.storage.interface import get_storage_service, StorageService
 from app.storage.minio_adapter import MinIOStorageService
 from app.users.models import User, UserRole
+from app.activity import service as activity_service
+
+
+def _product_snapshot(p) -> dict:
+    return {
+        "name": p.name,
+        "sku": p.sku,
+        "category_id": p.category_id,
+        "description": p.description,
+        "is_active": p.is_active,
+    }
+
+
+def _variant_snapshot(v) -> dict:
+    return {
+        "size": v.size,
+        "color": v.color,
+        "price": float(v.price) if v.price is not None else None,
+        "stock_quantity": v.stock_quantity,
+    }
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
@@ -70,10 +90,16 @@ async def list_categories(
 @categories_router.post("", response_model=CategoryResponse, status_code=201)
 async def create_category(
     data: CategoryCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     cat = await service.create_category(db, **data.model_dump())
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="category.created", entity_type="category", entity_id=cat.id,
+        new_values={"name": cat.name, "description": cat.description},
+    )
     return CategoryResponse.model_validate(cat)
 
 
@@ -81,20 +107,31 @@ async def create_category(
 async def update_category(
     category_id: int,
     data: CategoryUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     cat = await service.update_category(db, category_id, **data.model_dump(exclude_unset=True))
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="category.updated", entity_type="category", entity_id=cat.id,
+        new_values={"name": cat.name, "description": cat.description},
+    )
     return CategoryResponse.model_validate(cat)
 
 
 @categories_router.delete("/{category_id}", status_code=204)
 async def delete_category(
     category_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     await service.delete_category(db, category_id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="category.deleted", entity_type="category", entity_id=category_id,
+    )
 
 
 # ── Products ────────────────────────────────────────────
@@ -162,13 +199,19 @@ async def get_product(
 @router.post("", response_model=schemas.ProductResponse, status_code=201)
 async def create_product(
     data: schemas.ProductCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     dump = data.model_dump()
     variants = [v.model_dump() for v in data.variants]
     dump.pop("variants")
     product = await service.create_product(db, variants=variants, **dump)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="product.created", entity_type="product", entity_id=product.id,
+        new_values={**_product_snapshot(product), "variant_count": len(product.variants or [])},
+    )
     return schemas.ProductResponse.model_validate(product)
 
 
@@ -176,11 +219,21 @@ async def create_product(
 async def update_product(
     product_id: int,
     data: schemas.ProductUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
     storage: StorageService = Depends(get_storage_service),
 ):
+    existing = await service.get_product_by_id(db, product_id)
+    old_snapshot = _product_snapshot(existing)
     product = await service.update_product(db, product_id, **data.model_dump(exclude_unset=True))
+    new_snapshot = _product_snapshot(product)
+    if old_snapshot != new_snapshot:
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="product.updated", entity_type="product", entity_id=product.id,
+            old_values=old_snapshot, new_values=new_snapshot,
+        )
     response = schemas.ProductResponse.model_validate(product)
     return _populate_image_urls(response, storage)
 
@@ -188,10 +241,19 @@ async def update_product(
 @router.delete("/{product_id}", status_code=204)
 async def delete_product(
     product_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
+    existing = await service.get_product_by_id(db, product_id)
+    snapshot = _product_snapshot(existing)
     await service.delete_product(db, product_id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="product.deleted", entity_type="product", entity_id=product_id,
+        old_values=snapshot,
+        details=f"Deleted {snapshot['name']} ({snapshot['sku']})",
+    )
 
 
 # ── Variants ────────────────────────────────────────────
@@ -200,10 +262,16 @@ async def delete_product(
 async def create_variant(
     product_id: int,
     data: schemas.VariantCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     variant = await service.create_variant(db, product_id, **data.model_dump())
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="variant.created", entity_type="variant", entity_id=variant.id,
+        new_values={"product_id": product_id, **_variant_snapshot(variant)},
+    )
     return schemas.VariantResponse.model_validate(variant)
 
 
@@ -211,20 +279,45 @@ async def create_variant(
 async def update_variant(
     variant_id: int,
     data: schemas.VariantUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
-    variant = await service.update_variant(db, variant_id, admin_user_id=_admin.id, **data.model_dump(exclude_unset=True))
+    from app.products.models import ProductVariant
+    from sqlalchemy import select as _sel
+    existing_q = await db.execute(_sel(ProductVariant).where(ProductVariant.id == variant_id))
+    existing = existing_q.scalar_one_or_none()
+    old_snapshot = _variant_snapshot(existing) if existing else None
+
+    variant = await service.update_variant(db, variant_id, admin_user_id=admin.id, **data.model_dump(exclude_unset=True))
+    new_snapshot = _variant_snapshot(variant)
+    if old_snapshot and old_snapshot != new_snapshot:
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="variant.updated", entity_type="variant", entity_id=variant.id,
+            old_values=old_snapshot, new_values=new_snapshot,
+        )
     return schemas.VariantResponse.model_validate(variant)
 
 
 @router.delete("/variants/{variant_id}", status_code=204)
 async def delete_variant(
     variant_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
+    from app.products.models import ProductVariant
+    from sqlalchemy import select as _sel
+    existing_q = await db.execute(_sel(ProductVariant).where(ProductVariant.id == variant_id))
+    existing = existing_q.scalar_one_or_none()
+    snapshot = _variant_snapshot(existing) if existing else None
     await service.delete_variant(db, variant_id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="variant.deleted", entity_type="variant", entity_id=variant_id,
+        old_values=snapshot,
+    )
 
 
 # ── Product Size Material Requirements ──────────────────

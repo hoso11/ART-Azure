@@ -1,12 +1,24 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import require_admin
 from app.users import service, schemas
 from app.users.models import User
+from app.activity import service as activity_service
 
 router = APIRouter(prefix="/users", tags=["Users"])
+
+
+def _user_snapshot(u: User) -> dict:
+    """Audit-safe snapshot. Never includes the password hash."""
+    return {
+        "email": u.email,
+        "role": u.role.value if hasattr(u.role, "value") else u.role,
+        "customer_id": u.customer_id,
+        "discount_percent": float(u.discount_percent) if u.discount_percent is not None else 0,
+        "is_active": u.is_active,
+    }
 
 
 @router.get("", response_model=schemas.UserListResponse)
@@ -41,11 +53,17 @@ async def get_user(
 @router.post("", response_model=schemas.UserResponse, status_code=201)
 async def create_user(
     data: schemas.UserCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     user = await service.create_user(
         db, data.email, data.password, data.role, data.customer_id, data.discount_percent
+    )
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="user.created", entity_type="user", entity_id=user.id,
+        new_values=_user_snapshot(user),
     )
     return schemas.UserResponse.model_validate(user)
 
@@ -54,17 +72,61 @@ async def create_user(
 async def update_user(
     user_id: int,
     data: schemas.UserUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
-    user = await service.update_user(db, user_id, **data.model_dump(exclude_unset=True))
+    payload = data.model_dump(exclude_unset=True)
+    password_changed = bool(payload.get("password"))
+
+    existing = await service.get_user_by_id(db, user_id)
+    old_snapshot = _user_snapshot(existing)
+    old_discount = float(existing.discount_percent) if existing.discount_percent is not None else 0
+
+    user = await service.update_user(db, user_id, **payload)
+    new_snapshot = _user_snapshot(user)
+    new_discount = float(user.discount_percent) if user.discount_percent is not None else 0
+
+    # Diff non-sensitive fields. Skip if nothing actually changed.
+    if old_snapshot != new_snapshot:
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="user.updated", entity_type="user", entity_id=user.id,
+            old_values=old_snapshot, new_values=new_snapshot,
+        )
+
+    if old_discount != new_discount:
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="user.discount_changed", entity_type="user", entity_id=user.id,
+            old_values={"discount_percent": old_discount},
+            new_values={"discount_percent": new_discount},
+        )
+
+    if password_changed:
+        # Sensitive — never include any value.
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="user.password_changed", entity_type="user", entity_id=user.id,
+            details="Password changed",
+        )
+
     return schemas.UserResponse.model_validate(user)
 
 
 @router.delete("/{user_id}", status_code=204)
 async def delete_user(
     user_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
+    existing = await service.get_user_by_id(db, user_id)
+    snapshot = _user_snapshot(existing)
     await service.delete_user(db, user_id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="user.deleted", entity_type="user", entity_id=user_id,
+        old_values=snapshot,
+        details=f"Soft-deleted {existing.email}",
+    )

@@ -26,7 +26,7 @@ Seed credentials (from `scripts/seed.py`): `admin@art-manufacturing.com` / `admi
 
 ## Definition of done — pre-completion checklist (load-bearing)
 
-Before declaring **any** task complete — feature, bug fix, refactor, doc-only — run these four checks. If any one fails, the task is not done. Fix the failure first; do not report success with caveats.
+Before declaring **any** task complete — feature, bug fix, refactor, doc-only — run these five checks. If any one fails, the task is not done. Fix the failure first; do not report success with caveats.
 
 1. **Backend tests pass.**
    ```bash
@@ -51,6 +51,22 @@ Before declaring **any** task complete — feature, bug fix, refactor, doc-only 
    docker-compose logs --tail=20 frontend | grep -E "Compiled|error|Error"
    ```
    Required result: only `✓ Compiled` lines for affected routes; zero `error`/`Error` lines. The TypeScript check above catches type errors; this catches runtime import failures (missing files, circular imports, wrong default-vs-named exports).
+
+5. **Audit logging on every new mutation.** Any new endpoint or service action that mutates state must call `await activity_service.log_activity(...)`. This applies to: **create, update, delete, status change, stock/material quantity change, report export, and production completion** (any operation that an admin would later want to ask "who did this?" about). Use the router-layer pattern — capture old snapshot before the mutation if a diff is needed, then call the helper after the mutation succeeds:
+   ```python
+   from app.activity import service as activity_service
+
+   await activity_service.log_activity(
+       db,
+       user=admin,            # or None for failed-auth events
+       request=request,       # FastAPI Request, captures IP via X-Forwarded-For
+       action="<module>.<verb>",   # snake_case, e.g. "order.status_changed"
+       entity_type="<module>",     # e.g. "order", "product", "production_batch"
+       entity_id=...,
+       old_values=..., new_values=..., details=...,
+   )
+   ```
+   Rules: (a) `log_activity` never raises — safe to call from any path; (b) sensitive data (passwords, hashes, tokens) **never** goes into `old_values` / `new_values` — use a values-free `*.password_changed`-style action with `details="..."` instead; (c) for endpoints that raise after the mutation (e.g. failed login), `await db.commit()` before raising so the audit row survives `get_db`'s rollback; (d) add a matching label entry in `frontend/src/app/dashboard/activity/page.tsx` `ACTION_LABELS` so the UI renders human Armenian text. If audit logging is missing on a new mutation, the task is not complete — no "I'll add it in the next PR".
 
 If you cannot run a check (e.g. the stack is down), say so explicitly in the final report — do not silently skip it. "I changed X and Y; tests not run because Docker isn't up" is acceptable; "task complete" without running these is not.
 

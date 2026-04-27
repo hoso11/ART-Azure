@@ -1,12 +1,22 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import require_admin
 from app.inventory import service, schemas
 from app.users.models import User
+from app.activity import service as activity_service
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
+
+
+def _material_snapshot(m) -> dict:
+    return {
+        "name": m.name,
+        "sku": m.sku,
+        "unit": m.unit,
+        "reorder_threshold": float(m.reorder_threshold) if getattr(m, "reorder_threshold", None) is not None else None,
+    }
 
 
 # ── Materials ───────────────────────────────────────────
@@ -52,10 +62,16 @@ async def get_material(
 @router.post("/materials", response_model=schemas.MaterialResponse, status_code=201)
 async def create_material(
     data: schemas.MaterialCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
     material = await service.create_material(db, **data.model_dump())
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="material.created", entity_type="material", entity_id=material.id,
+        new_values=_material_snapshot(material),
+    )
     return schemas.MaterialResponse.model_validate(material)
 
 
@@ -63,20 +79,40 @@ async def create_material(
 async def update_material(
     material_id: int,
     data: schemas.MaterialUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
-    material = await service.update_material(db, material_id, admin_user_id=_admin.id, **data.model_dump(exclude_unset=True))
+    existing = await service.get_material_by_id(db, material_id)
+    old_snapshot = _material_snapshot(existing)
+
+    material = await service.update_material(db, material_id, admin_user_id=admin.id, **data.model_dump(exclude_unset=True))
+    new_snapshot = _material_snapshot(material)
+    if old_snapshot != new_snapshot:
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="material.updated", entity_type="material", entity_id=material.id,
+            old_values=old_snapshot, new_values=new_snapshot,
+        )
     return schemas.MaterialResponse.model_validate(material)
 
 
 @router.delete("/materials/{material_id}", status_code=204)
 async def delete_material(
     material_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
+    existing = await service.get_material_by_id(db, material_id)
+    snapshot = _material_snapshot(existing)
     await service.delete_material(db, material_id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="material.deleted", entity_type="material", entity_id=material_id,
+        old_values=snapshot,
+        details=f"Deleted {snapshot['name']}",
+    )
 
 
 # ── Stock Movements ─────────────────────────────────────
@@ -103,6 +139,7 @@ async def list_movements(
 @router.post("/movements", response_model=schemas.StockMovementResponse, status_code=201)
 async def create_movement(
     data: schemas.StockMovementCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
@@ -113,5 +150,15 @@ async def create_movement(
         reason=data.reason,
         created_by=admin.id,
         order_id=data.order_id,
+    )
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="inventory.stock_movement", entity_type="stock_movement", entity_id=movement.id,
+        new_values={
+            "material_id": movement.material_id,
+            "quantity_change": float(movement.quantity_change),
+            "reason": movement.reason.value if hasattr(movement.reason, "value") else movement.reason,
+            "order_id": movement.order_id,
+        },
     )
     return schemas.StockMovementResponse.model_validate(movement)
