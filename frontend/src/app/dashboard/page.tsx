@@ -1,5 +1,5 @@
 import { requireAuth } from "@/lib/auth";
-import { serverGet } from "@/lib/api";
+import { serverGet } from "@/lib/api.server";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { DashboardStats, OrderTrend } from "@/types";
 import { DashboardCharts } from "./DashboardCharts";

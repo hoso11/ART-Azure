@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 from decimal import Decimal
-from sqlalchemy import String, Integer, ForeignKey, DateTime, Text, Numeric, Enum
+from sqlalchemy import String, Boolean, Integer, ForeignKey, DateTime, Text, Numeric, Enum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -32,6 +32,7 @@ class Order(Base):
     priority: Mapped[OrderPriority] = mapped_column(Enum(OrderPriority), default=OrderPriority.normal)
     deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    materials_deducted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -50,6 +51,8 @@ class OrderItem(Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fulfilled_from_stock: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    production_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     order = relationship("Order", back_populates="items")
     product_variant = relationship("ProductVariant", lazy="selectin")

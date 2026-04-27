@@ -56,6 +56,8 @@ services:
     environment:
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
       DATABASE_URL: ${DATABASE_URL}
+    volumes:
+      - ./backend:/app
     depends_on:
       postgres:
         condition: service_healthy

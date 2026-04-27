@@ -99,9 +99,9 @@ async def update_order(
     order_id: int,
     data: schemas.OrderUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    current_admin: User = Depends(require_admin),
 ):
-    order = await service.update_order(db, order_id, **data.model_dump(exclude_unset=True))
+    order = await service.update_order(db, order_id, admin_user_id=current_admin.id, **data.model_dump(exclude_unset=True))
     return schemas.OrderResponse.model_validate(order)
 
 
@@ -110,9 +110,9 @@ async def update_order_status(
     order_id: int,
     data: schemas.OrderStatusUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    current_admin: User = Depends(require_admin),
 ):
-    order = await service.update_order(db, order_id, status=data.status)
+    order = await service.update_order(db, order_id, admin_user_id=current_admin.id, status=data.status)
     return schemas.OrderResponse.model_validate(order)
 
 

@@ -1,5 +1,5 @@
 import { requireAdmin } from "@/lib/auth";
-import { serverGet } from "@/lib/api";
+import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, Customer } from "@/types";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";

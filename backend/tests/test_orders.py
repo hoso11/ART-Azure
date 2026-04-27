@@ -29,13 +29,30 @@ async def test_create_order(client: AsyncClient, admin_user, customer, admin_coo
 
 @pytest.mark.asyncio
 async def test_order_status_transition(client: AsyncClient, admin_user, customer, admin_cookies):
-    # Create order
+    # Create product with variant size "S"
     prod_resp = await client.post("/api/v1/products", json={
         "name": "Status Test Product",
         "sku": "TST-STS-001",
         "variants": [{"size": "S", "color": "White", "price": 30.00}],
     }, cookies=admin_cookies)
+    product_id = prod_resp.json()["id"]
     variant_id = prod_resp.json()["variants"][0]["id"]
+
+    # Create material with sufficient stock (draft→confirmed deducts materials)
+    mat_resp = await client.post("/api/v1/inventory/materials", json={
+        "name": "Test Fabric STS",
+        "sku": "MAT-STS-001",
+        "unit": "meters",
+        "quantity_on_hand": 100,
+    }, cookies=admin_cookies)
+    material_id = mat_resp.json()["id"]
+
+    # Add size material requirement: 2 meters per item, size "S"
+    await client.post(f"/api/v1/products/{product_id}/size-requirements", json={
+        "material_id": material_id,
+        "size": "S",
+        "quantity_per_item": 2,
+    }, cookies=admin_cookies)
 
     order_resp = await client.post("/api/v1/orders", json={
         "customer_id": customer.id,
@@ -43,7 +60,7 @@ async def test_order_status_transition(client: AsyncClient, admin_user, customer
     }, cookies=admin_cookies)
     order_id = order_resp.json()["id"]
 
-    # Valid transition: draft → confirmed
+    # Valid transition: draft → confirmed (deducts 5 * 2 = 10 meters)
     resp = await client.patch(f"/api/v1/orders/{order_id}", json={"status": "confirmed"}, cookies=admin_cookies)
     assert resp.status_code == 200
     assert resp.json()["status"] == "confirmed"

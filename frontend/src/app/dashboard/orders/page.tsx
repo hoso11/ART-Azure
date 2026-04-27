@@ -1,5 +1,5 @@
 import { requireAuth } from "@/lib/auth";
-import { serverGet } from "@/lib/api";
+import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, Order } from "@/types";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";

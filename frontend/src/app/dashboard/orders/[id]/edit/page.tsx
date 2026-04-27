@@ -1,5 +1,5 @@
 import { requireAdmin } from "@/lib/auth";
-import { serverGet } from "@/lib/api";
+import { serverGet } from "@/lib/api.server";
 import { Order } from "@/types";
 import Link from "next/link";
 import { OrderEditForm } from "./OrderEditForm";

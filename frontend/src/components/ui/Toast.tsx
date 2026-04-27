@@ -31,7 +31,7 @@ export function Toast() {
       {toasts.map((t) => (
         <div
           key={t.id}
-          className={`px-4 py-2 rounded-lg shadow-lg text-sm border ${
+          className={`px-4 py-2 rounded-lg shadow-lg text-sm border whitespace-pre-wrap max-w-sm ${
             t.type === "success"
               ? "bg-green-50 border-green-200 text-green-800"
               : "bg-red-50 border-red-200 text-red-700"

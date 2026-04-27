@@ -98,12 +98,12 @@ async def client():
 
 
 @pytest.fixture
-def admin_cookies(admin_user: User):
+async def admin_cookies(admin_user: User):
     token = create_access_token(admin_user.id, admin_user.role.value)
     return {"access_token": token}
 
 
 @pytest.fixture
-def user_cookies(simple_user: User):
+async def user_cookies(simple_user: User):
     token = create_access_token(simple_user.id, simple_user.role.value)
     return {"access_token": token}

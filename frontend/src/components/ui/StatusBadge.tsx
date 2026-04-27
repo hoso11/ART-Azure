@@ -7,7 +7,7 @@ const LABELS: Record<string, string> = {
   "in_production": "Արտադրության մեջ",
   "completed": "Ավարտված",
   "cancelled": "Չեղարկված",
-  "shipped": "Shipped",
+  "shipped": "Առաքված",
   "pending": "Սպասման մեջ",
   "in_progress": "Ընթացքի մեջ",
   "normal": "Սովորական",

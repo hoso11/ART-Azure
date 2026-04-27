@@ -18,6 +18,8 @@ class OrderItemResponse(BaseModel):
     quantity: int
     unit_price: Decimal
     notes: Optional[str] = None
+    fulfilled_from_stock: int = 0
+    production_quantity: int = 0
 
     model_config = {"from_attributes": True}
 

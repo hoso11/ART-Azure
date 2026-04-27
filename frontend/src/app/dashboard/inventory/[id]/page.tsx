@@ -1,5 +1,5 @@
 import { requireAdmin } from "@/lib/auth";
-import { serverGet } from "@/lib/api";
+import { serverGet } from "@/lib/api.server";
 import { Material, StockMovement, PaginatedResponse } from "@/types";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { formatDateTime } from "@/lib/utils";

@@ -9,6 +9,7 @@ from app.database import Base
 class StockMovementReason(str, enum.Enum):
     purchase = "purchase"
     production_usage = "production_usage"
+    stock_based_production = "stock_based_production"
     adjustment = "adjustment"
     return_ = "return"
 

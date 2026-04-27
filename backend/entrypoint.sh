@@ -5,6 +5,29 @@
 # errors like: `alembic: 1: Syntax error: Unterminated quoted string`.
 
 echo "[entrypoint] waiting for postgres and running migrations..."
+
+# Guard: if the DB is stamped at a revision whose file no longer exists
+# (e.g. 005_production_records or 007_production_batches were removed),
+# reset the stamp to the nearest known-good head so alembic upgrade can proceed.
+python - << 'PYEOF'
+import os, sys
+try:
+    from sqlalchemy import create_engine, text
+    engine = create_engine(os.environ.get("DATABASE_URL_SYNC", ""))
+    known = {
+        None, "001_initial", "002_var_mat_req", "003_user_discount",
+        "004_order_materials_deducted", "006_order_item_fulfillment",
+    }
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).first()
+        current = row[0] if row else None
+        if current not in known:
+            conn.execute(text("UPDATE alembic_version SET version_num = '006_order_item_fulfillment'"))
+            print(f"[entrypoint] migration guard: stamped {current!r} -> 006_order_item_fulfillment", flush=True)
+except Exception as exc:
+    print(f"[entrypoint] migration guard skipped: {exc}", file=sys.stderr, flush=True)
+PYEOF
+
 attempt=0
 until alembic upgrade head; do
     attempt=$((attempt + 1))

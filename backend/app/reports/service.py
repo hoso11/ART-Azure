@@ -1,32 +1,61 @@
 import csv
 import io
 from datetime import datetime, timedelta
+from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 
-from app.orders.models import Order, OrderStatus
-from app.inventory.models import Material, Inventory
-from app.production.models import ProductionStage, StageStatus
+from app.orders.models import Order, OrderItem, OrderStatus
+from app.inventory.models import Material, Inventory, StockMovement
+from app.production.models import ProductionStage
 from app.activity.models import ActivityLog
+from app.exceptions import ValidationException
 
+
+# ── Helpers ─────────────────────────────────────────────
+
+def _parse_dates(
+    start_date: str | None,
+    end_date: str | None,
+) -> tuple[datetime | None, datetime | None]:
+    start = end = None
+    try:
+        if start_date:
+            start = datetime.strptime(start_date, "%Y-%m-%d")
+        if end_date:
+            end = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+    except ValueError as exc:
+        raise ValidationException(
+            detail=f"Invalid date format '{exc}'. Use YYYY-MM-DD.",
+            code="invalid_date",
+        )
+    return start, end
+
+
+def _to_csv(headers: list[str], rows: list[list]) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(headers)
+    for row in rows:
+        writer.writerow(row)
+    return output.getvalue()
+
+
+# ── Existing endpoints (unchanged) ──────────────────────
 
 async def get_dashboard_stats(db: AsyncSession) -> dict:
-    # Active orders
     active_orders = await db.execute(
         select(func.count()).select_from(Order).where(
             Order.status.in_([OrderStatus.confirmed, OrderStatus.in_production])
         )
     )
-
-    # Delayed orders
     delayed_orders = await db.execute(
         select(func.count()).select_from(Order).where(
             Order.deadline < datetime.utcnow(),
             Order.status.not_in([OrderStatus.shipped, OrderStatus.cancelled, OrderStatus.completed]),
         )
     )
-
-    # Low stock materials
     low_stock = await db.execute(
         select(func.count())
         .select_from(Material)
@@ -34,20 +63,15 @@ async def get_dashboard_stats(db: AsyncSession) -> dict:
         .where(Inventory.quantity_on_hand <= Material.low_stock_threshold)
         .where(Material.low_stock_threshold > 0)
     )
-
-    # Production stage summary
     stage_summary = await db.execute(
         select(ProductionStage.status, func.count())
         .group_by(ProductionStage.status)
     )
-
-    # Recent activity
     recent = await db.execute(
         select(ActivityLog)
         .order_by(ActivityLog.created_at.desc())
         .limit(10)
     )
-
     return {
         "active_orders": active_orders.scalar(),
         "delayed_orders": delayed_orders.scalar(),
@@ -82,7 +106,6 @@ async def get_order_trends(db: AsyncSession, days: int = 30) -> list[dict]:
 async def generate_orders_csv(db: AsyncSession) -> str:
     result = await db.execute(select(Order).order_by(Order.created_at.desc()))
     orders = result.scalars().all()
-
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["ID", "Customer ID", "Status", "Priority", "Deadline", "Created At"])
@@ -96,3 +119,385 @@ async def generate_orders_csv(db: AsyncSession) -> str:
             order.created_at.isoformat(),
         ])
     return output.getvalue()
+
+
+# ── Orders Report ────────────────────────────────────────
+
+async def get_orders_report(
+    db: AsyncSession,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    status: str | None = None,
+    customer_id: int | None = None,
+) -> list[dict]:
+    start, end = _parse_dates(start_date, end_date)
+    query = (
+        select(Order)
+        .options(selectinload(Order.items), selectinload(Order.customer))
+        .order_by(Order.created_at.desc())
+    )
+    if start:
+        query = query.where(Order.created_at >= start)
+    if end:
+        query = query.where(Order.created_at <= end)
+    if status:
+        query = query.where(Order.status == status)
+    if customer_id:
+        query = query.where(Order.customer_id == customer_id)
+
+    result = await db.execute(query)
+    orders = result.scalars().unique().all()
+
+    rows = []
+    for o in orders:
+        total = sum(Decimal(str(item.unit_price)) * item.quantity for item in o.items)
+        rows.append({
+            "id": o.id,
+            "customer_name": o.customer.name if o.customer else "",
+            "company_name": o.customer.company_name if o.customer else None,
+            "status": o.status.value,
+            "priority": o.priority.value,
+            "total_price": float(total),
+            "created_at": o.created_at.isoformat(),
+            "deadline": o.deadline.isoformat() if o.deadline else None,
+            "updated_at": o.updated_at.isoformat(),
+        })
+    return rows
+
+
+def orders_report_to_csv(data: list[dict]) -> str:
+    headers = ["ID", "Customer", "Company", "Status", "Priority", "Total Price", "Created At", "Deadline", "Updated At"]
+    rows = [
+        [
+            r["id"], r["customer_name"], r["company_name"] or "",
+            r["status"], r["priority"], r["total_price"],
+            r["created_at"], r["deadline"] or "", r["updated_at"],
+        ]
+        for r in data
+    ]
+    return _to_csv(headers, rows)
+
+
+# ── Sales / Revenue Report ───────────────────────────────
+
+async def get_sales_report(
+    db: AsyncSession,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    start, end = _parse_dates(start_date, end_date)
+    query = (
+        select(Order)
+        .options(selectinload(Order.items), selectinload(Order.customer))
+    )
+    if start:
+        query = query.where(Order.created_at >= start)
+    if end:
+        query = query.where(Order.created_at <= end)
+
+    result = await db.execute(query)
+    orders = result.scalars().unique().all()
+
+    revenue_statuses = {
+        OrderStatus.confirmed, OrderStatus.in_production,
+        OrderStatus.completed, OrderStatus.shipped,
+    }
+    confirmed_count = sum(1 for o in orders if o.status == OrderStatus.confirmed)
+    completed_count = sum(1 for o in orders if o.status == OrderStatus.completed)
+
+    total_revenue = Decimal("0")
+    by_day: dict[str, dict] = {}
+    by_customer: dict[int, dict] = {}
+
+    for o in orders:
+        order_total = sum(Decimal(str(i.unit_price)) * i.quantity for i in o.items)
+        if o.status not in revenue_statuses:
+            continue
+
+        total_revenue += order_total
+        date_key = o.created_at.date().isoformat()
+        by_day.setdefault(date_key, {"date": date_key, "count": 0, "revenue": Decimal("0")})
+        by_day[date_key]["count"] += 1
+        by_day[date_key]["revenue"] += order_total
+
+        cid = o.customer_id
+        by_customer.setdefault(cid, {
+            "customer_name": o.customer.name if o.customer else f"Customer #{cid}",
+            "company_name": o.customer.company_name if o.customer else None,
+            "orders": 0,
+            "revenue": Decimal("0"),
+        })
+        by_customer[cid]["orders"] += 1
+        by_customer[cid]["revenue"] += order_total
+
+    return {
+        "summary": {
+            "total_orders": len(orders),
+            "confirmed_orders": confirmed_count,
+            "completed_orders": completed_count,
+            "total_revenue": float(total_revenue),
+        },
+        "by_day": [
+            {"date": v["date"], "count": v["count"], "revenue": float(v["revenue"])}
+            for v in sorted(by_day.values(), key=lambda x: x["date"])
+        ],
+        "by_customer": [
+            {
+                "customer_name": v["customer_name"],
+                "company_name": v["company_name"],
+                "orders": v["orders"],
+                "revenue": float(v["revenue"]),
+            }
+            for v in sorted(by_customer.values(), key=lambda x: -float(x["revenue"]))
+        ],
+    }
+
+
+def sales_report_to_csv(data: dict) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    s = data["summary"]
+    writer.writerow(["Sales Report Summary"])
+    writer.writerow(["Total Orders", s["total_orders"]])
+    writer.writerow(["Confirmed Orders", s["confirmed_orders"]])
+    writer.writerow(["Completed Orders", s["completed_orders"]])
+    writer.writerow(["Total Revenue", s["total_revenue"]])
+    writer.writerow([])
+    writer.writerow(["Revenue by Day", "Order Count", "Revenue"])
+    for row in data["by_day"]:
+        writer.writerow([row["date"], row["count"], row["revenue"]])
+    writer.writerow([])
+    writer.writerow(["Customer", "Company", "Orders", "Revenue"])
+    for row in data["by_customer"]:
+        writer.writerow([row["customer_name"], row["company_name"] or "", row["orders"], row["revenue"]])
+    return output.getvalue()
+
+
+# ── Inventory / Stock Report ─────────────────────────────
+
+async def get_inventory_report(db: AsyncSession) -> list[dict]:
+    result = await db.execute(select(Material).order_by(Material.name))
+    materials = result.scalars().all()
+
+    rows = []
+    for m in materials:
+        qty = m.inventory.quantity_on_hand if m.inventory else Decimal("0")
+        threshold = m.low_stock_threshold
+        rows.append({
+            "id": m.id,
+            "name": m.name,
+            "sku": m.sku,
+            "unit": m.unit,
+            "quantity_on_hand": float(qty),
+            "low_stock_threshold": float(threshold),
+            "is_low_stock": threshold > 0 and qty <= threshold,
+        })
+    return rows
+
+
+def inventory_report_to_csv(data: list[dict]) -> str:
+    headers = ["ID", "Material", "SKU", "Unit", "Available Qty", "Min Qty", "Low Stock"]
+    rows = [
+        [r["id"], r["name"], r["sku"], r["unit"],
+         r["quantity_on_hand"], r["low_stock_threshold"],
+         "Yes" if r["is_low_stock"] else "No"]
+        for r in data
+    ]
+    return _to_csv(headers, rows)
+
+
+# ── Material Consumption Report ──────────────────────────
+
+async def get_material_consumption_report(
+    db: AsyncSession,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    material_id: int | None = None,
+) -> list[dict]:
+    from app.users.models import User
+
+    start, end = _parse_dates(start_date, end_date)
+    query = select(StockMovement).order_by(StockMovement.created_at.desc())
+    if start:
+        query = query.where(StockMovement.created_at >= start)
+    if end:
+        query = query.where(StockMovement.created_at <= end)
+    if material_id:
+        query = query.where(StockMovement.material_id == material_id)
+
+    result = await db.execute(query)
+    movements = result.scalars().all()
+
+    user_ids = list({m.created_by for m in movements})
+    users_map: dict[int, str] = {}
+    if user_ids:
+        u_result = await db.execute(select(User).where(User.id.in_(user_ids)))
+        users_map = {u.id: u.email for u in u_result.scalars().all()}
+
+    return [
+        {
+            "id": m.id,
+            "material_name": m.material.name if m.material else f"Material #{m.material_id}",
+            "unit": m.material.unit if m.material else "",
+            "quantity_change": float(m.quantity_change),
+            "order_id": m.order_id,
+            "reason": m.reason.value,
+            "created_at": m.created_at.isoformat(),
+            "created_by_email": users_map.get(m.created_by, f"User #{m.created_by}"),
+        }
+        for m in movements
+    ]
+
+
+def material_consumption_to_csv(data: list[dict]) -> str:
+    headers = ["ID", "Material", "Unit", "Qty Change", "Order ID", "Reason", "Date", "Admin"]
+    rows = [
+        [r["id"], r["material_name"], r["unit"], r["quantity_change"],
+         r["order_id"] or "", r["reason"], r["created_at"], r["created_by_email"]]
+        for r in data
+    ]
+    return _to_csv(headers, rows)
+
+
+# ── Production Status Report ─────────────────────────────
+
+async def get_production_report(
+    db: AsyncSession,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    stage: str | None = None,
+) -> list[dict]:
+    start, end = _parse_dates(start_date, end_date)
+    query = select(ProductionStage).order_by(ProductionStage.order_id)
+
+    if start or end:
+        order_subq = select(Order.id)
+        if start:
+            order_subq = order_subq.where(Order.created_at >= start)
+        if end:
+            order_subq = order_subq.where(Order.created_at <= end)
+        query = query.where(ProductionStage.order_id.in_(order_subq))
+
+    if stage:
+        query = query.where(ProductionStage.stage_name == stage)
+
+    result = await db.execute(query)
+    records = result.scalars().all()
+
+    return [
+        {
+            "id": r.id,
+            "order_id": r.order_id,
+            "stage_name": r.stage_name.value if hasattr(r.stage_name, "value") else r.stage_name,
+            "status": r.status.value if hasattr(r.status, "value") else r.status,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+        }
+        for r in records
+    ]
+
+
+def production_report_to_csv(data: list[dict]) -> str:
+    headers = ["ID", "Order ID", "Stage", "Status", "Started At", "Completed At"]
+    rows = [
+        [r["id"], r["order_id"], r["stage_name"], r["status"],
+         r["started_at"] or "", r["completed_at"] or ""]
+        for r in data
+    ]
+    return _to_csv(headers, rows)
+
+
+# ── Low Stock Materials Report ───────────────────────────
+
+async def get_low_stock_report(db: AsyncSession) -> list[dict]:
+    result = await db.execute(
+        select(Material)
+        .join(Inventory)
+        .where(Inventory.quantity_on_hand <= Material.low_stock_threshold)
+        .where(Material.low_stock_threshold > 0)
+        .order_by(Material.name)
+    )
+    materials = result.scalars().all()
+
+    rows = []
+    for m in materials:
+        qty = m.inventory.quantity_on_hand if m.inventory else Decimal("0")
+        rows.append({
+            "id": m.id,
+            "name": m.name,
+            "sku": m.sku,
+            "unit": m.unit,
+            "quantity_on_hand": float(qty),
+            "low_stock_threshold": float(m.low_stock_threshold),
+            "missing": float(m.low_stock_threshold - qty),
+        })
+    return rows
+
+
+def low_stock_to_csv(data: list[dict]) -> str:
+    headers = ["ID", "Material", "SKU", "Unit", "Available", "Minimum", "Missing"]
+    rows = [
+        [r["id"], r["name"], r["sku"], r["unit"],
+         r["quantity_on_hand"], r["low_stock_threshold"], r["missing"]]
+        for r in data
+    ]
+    return _to_csv(headers, rows)
+
+
+# ── Customer Discount Report ─────────────────────────────
+
+async def get_customer_discount_report(db: AsyncSession) -> list[dict]:
+    from app.users.models import User, UserRole
+    from app.customers.models import Customer
+
+    users_result = await db.execute(
+        select(User).where(User.role == UserRole.simple_user).order_by(User.email)
+    )
+    users = users_result.scalars().all()
+
+    customer_ids = [u.customer_id for u in users if u.customer_id]
+
+    customers_map: dict[int, Customer] = {}
+    orders_by_customer: dict[int, list] = {}
+
+    if customer_ids:
+        cust_result = await db.execute(select(Customer).where(Customer.id.in_(customer_ids)))
+        customers_map = {c.id: c for c in cust_result.scalars().all()}
+
+        orders_result = await db.execute(
+            select(Order)
+            .options(selectinload(Order.items))
+            .where(Order.customer_id.in_(customer_ids))
+            .where(Order.status.not_in([OrderStatus.cancelled, OrderStatus.draft]))
+        )
+        for o in orders_result.scalars().unique().all():
+            orders_by_customer.setdefault(o.customer_id, []).append(o)
+
+    rows = []
+    for user in users:
+        customer = customers_map.get(user.customer_id) if user.customer_id else None
+        orders = orders_by_customer.get(user.customer_id, []) if user.customer_id else []
+        total_revenue = sum(
+            sum(Decimal(str(i.unit_price)) * i.quantity for i in o.items)
+            for o in orders
+        )
+        rows.append({
+            "user_id": user.id,
+            "email": user.email,
+            "customer_name": customer.name if customer else None,
+            "company_name": customer.company_name if customer else None,
+            "discount_percent": float(user.discount_percent),
+            "total_orders": len(orders),
+            "total_revenue": float(total_revenue),
+        })
+    return rows
+
+
+def customer_discount_to_csv(data: list[dict]) -> str:
+    headers = ["User ID", "Email", "Customer", "Company", "Discount %", "Total Orders", "Total Revenue"]
+    rows = [
+        [r["user_id"], r["email"], r["customer_name"] or "", r["company_name"] or "",
+         r["discount_percent"], r["total_orders"], r["total_revenue"]]
+        for r in data
+    ]
+    return _to_csv(headers, rows)

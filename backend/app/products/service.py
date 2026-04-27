@@ -269,6 +269,10 @@ async def delete_product_image(db: AsyncSession, image_id: int) -> str:
 
 async def add_product_material(db: AsyncSession, product_id: int, material_id: int, quantity_required, unit: str) -> ProductMaterial:
     await get_product_by_id(db, product_id)
+    from app.inventory.models import Material as InventoryMaterial
+    mat = await db.execute(select(InventoryMaterial).where(InventoryMaterial.id == material_id))
+    if not mat.scalar_one_or_none():
+        raise NotFoundException(detail=f"Material {material_id} not found")
     pm = ProductMaterial(product_id=product_id, material_id=material_id, quantity_required=quantity_required, unit=unit)
     db.add(pm)
     await db.flush()
@@ -303,6 +307,10 @@ async def list_product_size_requirements(
 async def add_product_size_requirement(
     db: AsyncSession, product_id: int, material_id: int, size: str, quantity_per_item: Decimal
 ) -> ProductSizeMaterialRequirement:
+    from app.inventory.models import Material as InventoryMaterial
+    mat = await db.execute(select(InventoryMaterial).where(InventoryMaterial.id == material_id))
+    if not mat.scalar_one_or_none():
+        raise NotFoundException(detail=f"Material {material_id} not found")
     existing = await db.execute(
         select(ProductSizeMaterialRequirement).where(
             ProductSizeMaterialRequirement.product_id == product_id,

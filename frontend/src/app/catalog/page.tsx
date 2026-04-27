@@ -1,5 +1,5 @@
 import { requireAuth } from "@/lib/auth";
-import { serverGet } from "@/lib/api";
+import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, Product } from "@/types";
 import { formatCurrency } from "@/lib/utils";
 import Link from "next/link";

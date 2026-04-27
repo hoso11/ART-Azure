@@ -66,6 +66,8 @@ export interface OrderItem {
   quantity: number;
   unit_price: number;
   notes: string | null;
+  fulfilled_from_stock: number;
+  production_quantity: number;
 }
 
 export interface OrderCustomer {
@@ -135,6 +137,23 @@ export interface StockMovement {
   reason: string;
   created_by: number;
   created_at: string;
+}
+
+export interface ProductionBatch {
+  id: number;
+  product_id: number;
+  variant_id: number;
+  quantity_to_produce: number;
+  production_type: string;
+  current_stage: string;
+  stage_status: string;
+  materials_deducted: boolean;
+  stock_added: boolean;
+  created_by: number;
+  created_at: string;
+  completed_at: string | null;
+  product: { id: number; name: string; sku: string } | null;
+  variant: { id: number; size: string; color: string } | null;
 }
 
 export interface ProductSizeMaterialRequirement {

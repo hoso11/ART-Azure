@@ -1,11 +1,22 @@
 import { requireAdmin } from "@/lib/auth";
-import { serverGet } from "@/lib/api";
-import { PaginatedResponse, ProductionStage } from "@/types";
+import { serverGet } from "@/lib/api.server";
+import { PaginatedResponse, ProductionStage, ProductionBatch } from "@/types";
 import { Card, CardContent } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { formatDate } from "@/lib/utils";
 import Link from "next/link";
 import { StageStatusChange } from "./StageStatusChange";
+import { CreateBatchButton } from "./CreateBatchButton";
+import { BatchControl } from "./BatchControl";
+
+const BATCH_STAGE_LABELS: Record<string, string> = {
+  cutting: "Կտրում",
+  processing: "Մշակում",
+  quality_control: "Որակի վերահսկում",
+  packaging: "Փաթեթավորում",
+  warehousing: "Պահեստավորում",
+  ready_for_shipment: "Պատրաստ է առաքման",
+};
 
 export default async function ProductionPage({
   searchParams,
@@ -25,9 +36,16 @@ export default async function ProductionPage({
 
   const data = await serverGet<PaginatedResponse<ProductionStage>>(queryStr);
 
+  let batchesQueryStr = `/production/batches?page=1&limit=20`;
+  if (effectiveStatus) batchesQueryStr += `&stage_status=${effectiveStatus}`;
+  const batches = await serverGet<PaginatedResponse<ProductionBatch>>(batchesQueryStr);
+
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Արտադրություն</h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">Արտադրություն</h1>
+        <CreateBatchButton />
+      </div>
 
       {filter === "in_progress" && (
         <div className="mb-4 flex items-center gap-3 px-4 py-2 bg-brand-50 border border-brand-200 rounded-lg text-sm">
@@ -87,6 +105,69 @@ export default async function ProductionPage({
                         View
                       </Link>
                     </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+
+      {/* Stock-based production batches (production-for-stock) */}
+      <Card className="mt-6">
+        <div className="px-6 py-3 border-b border-gray-100 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-700">Պահեստի համար</h2>
+          <span className="text-xs text-gray-500">Տեսակ՝ Պահեստի համար</span>
+        </div>
+        <CardContent className="p-0">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ապրանք</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Տարբերակ</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Քանակ</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Փուլ</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Կարգավիճակ</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ստեղծվել է</th>
+                <th className="px-6 py-3"></th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {batches?.items.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-6 py-12 text-center text-gray-500 text-sm">
+                    Պահեստի համար արտադրություն չկա
+                  </td>
+                </tr>
+              )}
+              {batches?.items.map((b) => (
+                <tr key={b.id} className="hover:bg-gray-50">
+                  <td className="px-6 py-4 text-sm font-medium text-gray-900">
+                    {b.product?.name || `#${b.product_id}`}
+                  </td>
+                  <td className="px-6 py-4 text-sm text-gray-700">
+                    {b.variant ? `${b.variant.size} / ${b.variant.color}` : `#${b.variant_id}`}
+                  </td>
+                  <td className="px-6 py-4 text-sm font-medium">
+                    {b.quantity_to_produce}
+                    {b.stock_added && (
+                      <span className="ml-2 text-xs text-green-700">✓ Պահեստավորված</span>
+                    )}
+                  </td>
+                  <td className="px-6 py-4 text-sm">
+                    {BATCH_STAGE_LABELS[b.current_stage] || b.current_stage}
+                  </td>
+                  <td className="px-6 py-4">
+                    <StatusBadge status={b.stage_status} />
+                  </td>
+                  <td className="px-6 py-4 text-sm text-gray-600">{formatDate(b.created_at)}</td>
+                  <td className="px-6 py-4 text-right">
+                    <BatchControl
+                      batchId={b.id}
+                      currentStage={b.current_stage}
+                      currentStatus={b.stage_status}
+                      stockAdded={b.stock_added}
+                    />
                   </td>
                 </tr>
               ))}

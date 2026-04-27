@@ -8,7 +8,7 @@ const TRANSITIONS: Record<string, string[]> = {
   draft: ["confirmed", "cancelled"],
   confirmed: ["in_production", "cancelled"],
   in_production: ["completed", "cancelled"],
-  completed: [],
+  completed: ["shipped"],
   shipped: [],
   cancelled: [],
 };
@@ -18,7 +18,7 @@ const STATUS_LABELS: Record<string, string> = {
   confirmed: "Հաստատված",
   in_production: "Արտադրության մեջ",
   completed: "Ավարտված",
-  shipped: "Shipped",
+  shipped: "Առաքված",
   cancelled: "Չեղարկված",
 };
 
@@ -60,7 +60,7 @@ export function OrderStatusChange({ orderId, currentStatus }: { orderId: number;
   return (
     <div className="mt-3">
       {error && (
-        <p className="text-xs text-red-600 mb-2">{error}</p>
+        <p className="text-xs text-red-600 mb-2 whitespace-pre-wrap">{error}</p>
       )}
 
       {confirming ? (

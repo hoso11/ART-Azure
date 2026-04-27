@@ -6,7 +6,7 @@ from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
 from app.inventory.models import Material, Inventory, StockMovement
-from app.exceptions import NotFoundException, ConflictException
+from app.exceptions import NotFoundException, ConflictException, ValidationException
 
 
 # ── Materials ───────────────────────────────────────────
@@ -105,8 +105,19 @@ async def create_stock_movement(
 
     # Update inventory
     if material.inventory:
-        material.inventory.quantity_on_hand += quantity_change
+        new_qty = material.inventory.quantity_on_hand + quantity_change
+        if new_qty < 0:
+            raise ValidationException(
+                detail=f"Insufficient stock: available {material.inventory.quantity_on_hand} {material.unit}, adjustment would result in {new_qty}",
+                code="insufficient_stock",
+            )
+        material.inventory.quantity_on_hand = new_qty
     else:
+        if quantity_change < 0:
+            raise ValidationException(
+                detail="Cannot apply negative adjustment: no inventory record exists",
+                code="insufficient_stock",
+            )
         inv = Inventory(material_id=material_id, quantity_on_hand=quantity_change)
         db.add(inv)
 

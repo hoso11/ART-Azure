@@ -1,5 +1,5 @@
 import { requireAuth } from "@/lib/auth";
-import { serverGet } from "@/lib/api";
+import { serverGet } from "@/lib/api.server";
 import { Order, ProductionStage, PaginatedResponse } from "@/types";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -61,7 +61,13 @@ export default async function OrderDetailPage({
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Տարբերակ</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Քանակ</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Պատվիրված</th>
+                    {order.status !== "draft" && (
+                      <>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Պահուստից</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Արտ․</th>
+                      </>
+                    )}
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Միավորի գին</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Միջանկյալ գումար</th>
                   </tr>
@@ -71,6 +77,12 @@ export default async function OrderDetailPage({
                     <tr key={item.id}>
                       <td className="px-6 py-4 text-sm">Տարբերակ #{item.product_variant_id}</td>
                       <td className="px-6 py-4 text-sm">{item.quantity}</td>
+                      {order.status !== "draft" && (
+                        <>
+                          <td className="px-6 py-4 text-sm text-green-700 font-medium">{item.fulfilled_from_stock}</td>
+                          <td className="px-6 py-4 text-sm text-orange-600 font-medium">{item.production_quantity}</td>
+                        </>
+                      )}
                       <td className="px-6 py-4 text-sm">{formatCurrency(item.unit_price)}</td>
                       <td className="px-6 py-4 text-sm font-medium">{formatCurrency(item.quantity * item.unit_price)}</td>
                     </tr>
@@ -78,7 +90,7 @@ export default async function OrderDetailPage({
                 </tbody>
                 <tfoot className="bg-gray-50">
                   <tr>
-                    <td colSpan={3} className="px-6 py-3 text-right text-sm font-semibold">Ընդհանուր</td>
+                    <td colSpan={order.status !== "draft" ? 5 : 3} className="px-6 py-3 text-right text-sm font-semibold">Ընդհանուր</td>
                     <td className="px-6 py-3 text-sm font-bold">{formatCurrency(total)}</td>
                   </tr>
                 </tfoot>

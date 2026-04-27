@@ -33,17 +33,3 @@ export async function serverGet<T>(path: string): Promise<T | null> {
     return null;
   }
 }
-
-// Client-side API calls (from browser)
-export function clientFetch(path: string, options: RequestInit = {}) {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
-
-  return fetch(`${apiUrl}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options.headers,
-    },
-    credentials: "include",
-  });
-}

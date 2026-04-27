@@ -1,0 +1,560 @@
+"use client";
+
+import { useState } from "react";
+import { Customer, Material } from "@/types";
+import { formatDate, formatCurrency, getStatusColor } from "@/lib/utils";
+import { Card, CardContent, CardHeader } from "@/components/ui/Card";
+
+// ── Types ────────────────────────────────────────────────
+
+type ReportType =
+  | "orders"
+  | "sales"
+  | "inventory"
+  | "material-consumption"
+  | "production"
+  | "low-stock"
+  | "customer-discounts";
+
+type DatePreset = "today" | "7d" | "30d" | "90d" | "custom";
+
+interface Col {
+  key: string;
+  label: string;
+  format?: "currency" | "date" | "badge" | "bool" | "number";
+}
+
+// ── Constants ────────────────────────────────────────────
+
+const REPORT_TYPES: { value: ReportType; label: string }[] = [
+  { value: "orders", label: "Պատվերների հաշվետվություն" },
+  { value: "sales", label: "Վաճառքների հաշվետվություն" },
+  { value: "inventory", label: "Պահեստի հաշվետվություն" },
+  { value: "material-consumption", label: "Նյութերի օգտագործման հաշվետվություն" },
+  { value: "production", label: "Արտադրության հաշվետվություն" },
+  { value: "low-stock", label: "Ցածր մնացորդով նյութեր" },
+  { value: "customer-discounts", label: "Հաճախորդների զեղչերի հաշվետվություն" },
+];
+
+const DATE_PRESETS: { value: DatePreset; label: string }[] = [
+  { value: "today", label: "Այսօր" },
+  { value: "7d", label: "7 օր" },
+  { value: "30d", label: "30 օր" },
+  { value: "90d", label: "90 օր" },
+  { value: "custom", label: "Այլն" },
+];
+
+const DATE_FILTER_REPORTS = new Set<ReportType>(["orders", "sales", "material-consumption", "production"]);
+
+const ORDER_STATUSES = ["draft", "confirmed", "in_production", "completed", "shipped", "cancelled"];
+const PRODUCTION_STAGES = ["cutting", "sewing", "quality_control", "packaging", "ready_for_shipment"];
+
+const COLUMNS: Record<ReportType, Col[]> = {
+  orders: [
+    { key: "id", label: "ID" },
+    { key: "customer_name", label: "Հաճախորդ" },
+    { key: "status", label: "Կարգավիչակ", format: "badge" },
+    { key: "priority", label: "Kareviut", format: "badge" },
+    { key: "total_price", label: "Jamarak", format: "currency" },
+    { key: "created_at", label: "Stexjvel", format: "date" },
+    { key: "deadline", label: "Jam khet", format: "date" },
+  ],
+  sales: [],
+  inventory: [
+    { key: "name", label: "Material" },
+    { key: "sku", label: "SKU" },
+    { key: "unit", label: "Unit" },
+    { key: "quantity_on_hand", label: "Available", format: "number" },
+    { key: "low_stock_threshold", label: "Minimum", format: "number" },
+    { key: "is_low_stock", label: "Low Stock", format: "bool" },
+  ],
+  "material-consumption": [
+    { key: "material_name", label: "Material" },
+    { key: "quantity_change", label: "Qty Change", format: "number" },
+    { key: "unit", label: "Unit" },
+    { key: "order_id", label: "Order" },
+    { key: "reason", label: "Reason", format: "badge" },
+    { key: "created_at", label: "Date", format: "date" },
+    { key: "created_by_email", label: "Admin" },
+  ],
+  production: [
+    { key: "order_id", label: "Order ID" },
+    { key: "stage_name", label: "Stage", format: "badge" },
+    { key: "status", label: "Կարգավիչակ", format: "badge" },
+    { key: "started_at", label: "Started", format: "date" },
+    { key: "completed_at", label: "Completed", format: "date" },
+  ],
+  "low-stock": [
+    { key: "name", label: "Material" },
+    { key: "sku", label: "SKU" },
+    { key: "unit", label: "Unit" },
+    { key: "quantity_on_hand", label: "Available", format: "number" },
+    { key: "low_stock_threshold", label: "Minimum", format: "number" },
+    { key: "missing", label: "Missing", format: "number" },
+  ],
+  "customer-discounts": [
+    { key: "email", label: "Email" },
+    { key: "customer_name", label: "Հաճախորդ" },
+    { key: "discount_percent", label: "Discount %", format: "number" },
+    { key: "total_orders", label: "Orders", format: "number" },
+    { key: "total_revenue", label: "Revenue", format: "currency" },
+  ],
+};
+
+// ── Helpers ──────────────────────────────────────────────
+
+function getEffectiveDates(
+  preset: DatePreset,
+  customStart: string,
+  customEnd: string
+): { start: string; end: string } {
+  const today = new Date();
+  const fmt = (d: Date) => d.toISOString().split("T")[0];
+  if (preset === "today") return { start: fmt(today), end: fmt(today) };
+  if (preset === "7d") {
+    const d = new Date(today);
+    d.setDate(today.getDate() - 7);
+    return { start: fmt(d), end: fmt(today) };
+  }
+  if (preset === "30d") {
+    const d = new Date(today);
+    d.setDate(today.getDate() - 30);
+    return { start: fmt(d), end: fmt(today) };
+  }
+  if (preset === "90d") {
+    const d = new Date(today);
+    d.setDate(today.getDate() - 90);
+    return { start: fmt(d), end: fmt(today) };
+  }
+  return { start: customStart, end: customEnd };
+}
+
+function renderCell(value: unknown, col: Col): React.ReactNode {
+  if (value === null || value === undefined || value === "")
+    return <span className="text-gray-400">—</span>;
+
+  if (col.format === "currency") return formatCurrency(Number(value));
+  if (col.format === "date") return formatDate(String(value));
+  if (col.format === "number") return String(value);
+  if (col.format === "bool") {
+    return value ? (
+      <span className="text-xs font-semibold text-red-600">Ցածր</span>
+    ) : (
+      <span className="text-xs font-semibold text-green-600">OK</span>
+    );
+  }
+  if (col.format === "badge") {
+    return (
+      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getStatusColor(String(value))}`}>
+        {String(value).replace(/_/g, " ")}
+      </span>
+    );
+  }
+  return String(value);
+}
+
+// ── Sub-components ────────────────────────────────────────
+
+function EmptyState() {
+  return (
+    <div className="text-center py-12 text-gray-500 text-sm">
+      Տվյալներ չկան</div>
+  );
+}
+
+interface SalesData {
+  summary: {
+    total_orders: number;
+    confirmed_orders: number;
+    completed_orders: number;
+    total_revenue: number;
+  };
+  by_day: { date: string; count: number; revenue: number }[];
+  by_customer: { customer_name: string; company_name: string | null; orders: number; revenue: number }[];
+}
+
+function SalesPreview({ data }: { data: SalesData }) {
+  const { summary, by_day, by_customer } = data;
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {[
+          { label: "Bnor patverner", value: summary.total_orders, color: "text-blue-700" },
+          { label: "Հաստատված", value: summary.confirmed_orders, color: "text-green-700" },
+          { label: "Ավարտված", value: summary.completed_orders, color: "text-purple-700" },
+          { label: "Bnor Ehemut", value: formatCurrency(summary.total_revenue), color: "text-brand-800" },
+        ].map((item) => (
+          <div key={item.label} className="bg-gray-50 rounded-lg p-4">
+            <p className="text-xs text-gray-500">{item.label}</p>
+            <p className={`text-xl font-bold mt-1 ${item.color}`}>{item.value}</p>
+          </div>
+        ))}
+      </div>
+
+      {by_day.length > 0 && (
+        <div>
+          <h4 className="text-sm font-semibold text-gray-700 mb-2">Revenue by Day</h4>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200">
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Date</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Orders</th>
+                  <th className="text-left py-2 text-gray-500 font-medium">Revenue</th>
+                </tr>
+              </thead>
+              <tbody>
+                {by_day.map((row) => (
+                  <tr key={row.date} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="py-2 pr-4">{row.date}</td>
+                    <td className="py-2 pr-4">{row.count}</td>
+                    <td className="py-2">{formatCurrency(row.revenue)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {by_customer.length > 0 && (
+        <div>
+          <h4 className="text-sm font-semibold text-gray-700 mb-2">Revenue by Customer</h4>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200">
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Customer</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Company</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Orders</th>
+                  <th className="text-left py-2 text-gray-500 font-medium">Revenue</th>
+                </tr>
+              </thead>
+              <tbody>
+                {by_customer.map((row, i) => (
+                  <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="py-2 pr-4 font-medium">{row.customer_name}</td>
+                    <td className="py-2 pr-4 text-gray-500">{row.company_name || "—"}</td>
+                    <td className="py-2 pr-4">{row.orders}</td>
+                    <td className="py-2">{formatCurrency(row.revenue)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {by_day.length === 0 && by_customer.length === 0 && (
+        <EmptyState />
+      )}
+    </div>
+  );
+}
+
+// ── Main component ────────────────────────────────────────
+
+export function ReportBuilder({
+  customers,
+  materials,
+}: {
+  customers: Customer[];
+  materials: Material[];
+}) {
+  const [reportType, setReportType] = useState<ReportType>("orders");
+  const [datePreset, setDatePreset] = useState<DatePreset>("30d");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [customerFilter, setCustomerFilter] = useState("");
+  const [materialFilter, setMaterialFilter] = useState("");
+  const [stageFilter, setStageFilter] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [reportData, setReportData] = useState<unknown>(null);
+  const [error, setError] = useState("");
+  const [generated, setGenerated] = useState(false);
+
+  const hasDateFilter = DATE_FILTER_REPORTS.has(reportType);
+
+  function buildParams(format = "json"): URLSearchParams {
+    const p = new URLSearchParams({ format });
+    if (hasDateFilter) {
+      const { start, end } = getEffectiveDates(datePreset, customStart, customEnd);
+      if (start) p.set("start_date", start);
+      if (end) p.set("end_date", end);
+    }
+    if (reportType === "orders") {
+      if (statusFilter) p.set("status", statusFilter);
+      if (customerFilter) p.set("customer_id", customerFilter);
+    }
+    if (reportType === "material-consumption" && materialFilter) {
+      p.set("material_id", materialFilter);
+    }
+    if (reportType === "production" && stageFilter) {
+      p.set("stage", stageFilter);
+    }
+    return p;
+  }
+
+  async function handleGenerate() {
+    setError("");
+    setLoading(true);
+    setGenerated(false);
+    setReportData(null);
+    try {
+      const res = await fetch(`/api/v1/reports/${reportType}?${buildParams("json")}`, {
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setError(err.detail || "Չhajogvets bozhel hasvetvowthouthy");
+        return;
+      }
+      setReportData(await res.json());
+      setGenerated(true);
+    } catch {
+      setError("Կapich sxal");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleExport() {
+    window.location.href = `/api/v1/reports/${reportType}?${buildParams("csv")}`;
+  }
+
+  // Reset filters when report type changes
+  function handleTypeChange(type: ReportType) {
+    setReportType(type);
+    setStatusFilter("");
+    setCustomerFilter("");
+    setMaterialFilter("");
+    setStageFilter("");
+    setGenerated(false);
+    setReportData(null);
+    setError("");
+  }
+
+  const rows = Array.isArray(reportData) ? (reportData as Record<string, unknown>[]) : [];
+  const cols = COLUMNS[reportType];
+
+  return (
+    <Card className="mt-8">
+      <CardHeader>
+        <h3 className="font-semibold text-gray-900">Ստեղծել Հաշվետվություն</h3>
+      </CardHeader>
+      <CardContent>
+        {/* ── Controls ── */}
+        <div className="space-y-4">
+          {/* Report type */}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+Հաշվետվություն տեսակ
+            </label>
+            <select
+              value={reportType}
+              onChange={(e) => handleTypeChange(e.target.value as ReportType)}
+              className="w-full md:w-80 text-sm rounded-lg border border-gray-300 px-3 py-2 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+            >
+              {REPORT_TYPES.map((rt) => (
+                <option key={rt.value} value={rt.value}>{rt.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Date range */}
+          {hasDateFilter && (
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Ժամանակահատված
+              </label>
+              <div className="flex flex-wrap gap-2 mb-2">
+                {DATE_PRESETS.map((p) => (
+                  <button
+                    key={p.value}
+                    onClick={() => setDatePreset(p.value)}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                      datePreset === p.value
+                        ? "bg-brand-800 text-white border-brand-800"
+                        : "bg-white text-gray-700 border-gray-300 hover:border-brand-400"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              {datePreset === "custom" && (
+                <div className="flex gap-3 items-center">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">սկիզբ</label>
+                    <input
+                      type="date"
+                      value={customStart}
+                      onChange={(e) => setCustomStart(e.target.value)}
+                      className="text-sm rounded-lg border border-gray-300 px-3 py-1.5 focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">ավարտ</label>
+                    <input
+                      type="date"
+                      value={customEnd}
+                      onChange={(e) => setCustomEnd(e.target.value)}
+                      className="text-sm rounded-lg border border-gray-300 px-3 py-1.5 focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Optional filters */}
+          {(reportType === "orders" || reportType === "material-consumption" || reportType === "production") && (
+            <div className="flex flex-wrap gap-4">
+              {reportType === "orders" && (
+                <>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Կարգավիչակ</label>
+                    <select
+                      value={statusFilter}
+                      onChange={(e) => setStatusFilter(e.target.value)}
+                      className="text-sm rounded-lg border border-gray-300 px-3 py-2 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                    >
+                      <option value="">Բոլոր</option>
+                      {ORDER_STATUSES.map((s) => (
+                        <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Հաճախորդ</label>
+                    <select
+                      value={customerFilter}
+                      onChange={(e) => setCustomerFilter(e.target.value)}
+                      className="text-sm rounded-lg border border-gray-300 px-3 py-2 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                    >
+                      <option value="">Բոլոր</option>
+                      {customers.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}{c.company_name ? ` (${c.company_name})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              )}
+              {reportType === "material-consumption" && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Նյութեր</label>
+                  <select
+                    value={materialFilter}
+                    onChange={(e) => setMaterialFilter(e.target.value)}
+                    className="text-sm rounded-lg border border-gray-300 px-3 py-2 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                  >
+                    <option value="">Բոլոր</option>
+                    {materials.map((m) => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {reportType === "production" && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Արտադրության Կադառ</label>
+                  <select
+                    value={stageFilter}
+                    onChange={(e) => setStageFilter(e.target.value)}
+                    className="text-sm rounded-lg border border-gray-300 px-3 py-2 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                  >
+                    <option value="">Բոլոր</option>
+                    {PRODUCTION_STAGES.map((s) => (
+                      <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div className="flex gap-3 pt-1">
+            <button
+              onClick={handleGenerate}
+              disabled={loading}
+              className="px-4 py-2 bg-brand-800 text-white text-sm font-medium rounded-lg hover:bg-brand-900 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {loading ? "ստեղծվում ե..." : "Ստեղծել Հաշվետվություն"}
+            </button>
+            {generated && (
+              <button
+                onClick={handleExport}
+                className="px-4 py-2 bg-white text-brand-800 text-sm font-medium rounded-lg border border-brand-300 hover:bg-brand-50"
+              >
+                Արտահանել CSV
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* ── Error ── */}
+        {error && (
+          <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+            {error}
+          </div>
+        )}
+
+        {/* ── Preview ── */}
+        {generated && (
+          <div className="mt-6 border-t border-gray-100 pt-6">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-sm font-semibold text-gray-700">
+                {REPORT_TYPES.find((r) => r.value === reportType)?.label}
+              </h4>
+              {Array.isArray(reportData) && (
+                <span className="text-xs text-gray-400">{rows.length} տոլ</span>
+              )}
+            </div>
+
+            {reportType === "sales" ? (
+              reportData ? (
+                <SalesPreview data={reportData as SalesData} />
+              ) : (
+                <EmptyState />
+              )
+            ) : rows.length === 0 ? (
+              <EmptyState />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200">
+                      {cols.map((col) => (
+                        <th
+                          key={col.key}
+                          className="text-left py-2 pr-4 text-xs font-medium text-gray-500 whitespace-nowrap"
+                        >
+                          {col.label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row, i) => (
+                      <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                        {cols.map((col) => (
+                          <td key={col.key} className="py-2 pr-4 whitespace-nowrap">
+                            {renderCell(row[col.key], col)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}

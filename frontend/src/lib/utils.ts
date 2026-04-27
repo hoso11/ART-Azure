@@ -1,5 +1,5 @@
 export function formatDate(dateString: string): string {
-  return new Date(dateString).toLocaleDateString("en-US", {
+  return new Date(dateString).toLocaleDateString("hy-AM", {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -7,7 +7,7 @@ export function formatDate(dateString: string): string {
 }
 
 export function formatDateTime(dateString: string): string {
-  return new Date(dateString).toLocaleString("en-US", {
+  return new Date(dateString).toLocaleString("hy-AM", {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -18,7 +18,7 @@ export function formatDateTime(dateString: string): string {
 
 export function formatCurrency(amount: number | string): string {
   const num = Number(amount) || 0;
-  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(Math.round(num))} ֏`;
+  return `${new Intl.NumberFormat("hy-AM", { maximumFractionDigits: 0 }).format(Math.round(num))} ֏`;
 }
 
 export function cn(...classes: (string | boolean | undefined | null)[]): string {

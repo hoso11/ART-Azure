@@ -40,6 +40,83 @@ async def get_production_summary(
     return await service.get_production_summary(db)
 
 
+# ── Stock-based production batches ───────────────────────
+# These routes MUST be registered before /{stage_id} so the path matcher
+# does not try to parse "batches" as an integer stage id.
+
+@router.post(
+    "/batches",
+    response_model=schemas.ProductionBatchResponse,
+    status_code=201,
+)
+async def create_production_batch(
+    data: schemas.ProductionBatchCreate,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    batch = await service.create_production_batch(
+        db,
+        product_id=data.product_id,
+        variant_id=data.variant_id,
+        quantity_to_produce=data.quantity_to_produce,
+        created_by=admin.id,
+    )
+    return schemas.ProductionBatchResponse.model_validate(batch)
+
+
+@router.get("/batches", response_model=schemas.ProductionBatchListResponse)
+async def list_production_batches(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    stage_status: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    batches, total = await service.list_production_batches(
+        db, page=page, limit=limit, stage_status=stage_status
+    )
+    return schemas.ProductionBatchListResponse(
+        items=[schemas.ProductionBatchResponse.model_validate(b) for b in batches],
+        total=total,
+        page=page,
+        limit=limit,
+    )
+
+
+@router.patch(
+    "/batches/{batch_id}",
+    response_model=schemas.ProductionBatchResponse,
+)
+async def update_production_batch(
+    batch_id: int,
+    data: schemas.ProductionBatchUpdate,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    batch = await service.update_production_batch(
+        db,
+        batch_id,
+        new_stage=data.current_stage,
+        new_status=data.stage_status,
+    )
+    return schemas.ProductionBatchResponse.model_validate(batch)
+
+
+@router.patch(
+    "/batches/{batch_id}/complete",
+    response_model=schemas.ProductionBatchResponse,
+)
+async def complete_production_batch(
+    batch_id: int,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    batch = await service.complete_production_batch(db, batch_id)
+    return schemas.ProductionBatchResponse.model_validate(batch)
+
+
+# ── Order-based production stages (legacy / unchanged) ──
+
 @router.get("/{stage_id}", response_model=schemas.ProductionStageResponse)
 async def get_stage(
     stage_id: int,
