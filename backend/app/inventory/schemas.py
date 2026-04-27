@@ -8,6 +8,7 @@ class MaterialCreate(BaseModel):
     name: str
     sku: str
     unit: str
+    quantity_on_hand: Decimal = Field(default=0, ge=0)
     low_stock_threshold: Decimal = Field(default=0, ge=0)
     description: Optional[str] = None
 
@@ -16,6 +17,7 @@ class MaterialUpdate(BaseModel):
     name: Optional[str] = None
     sku: Optional[str] = None
     unit: Optional[str] = None
+    quantity_on_hand: Optional[Decimal] = Field(default=None, ge=0)
     low_stock_threshold: Optional[Decimal] = Field(default=None, ge=0)
     description: Optional[str] = None
 

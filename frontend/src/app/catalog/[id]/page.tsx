@@ -55,15 +55,27 @@ export default async function CatalogProductPage({
           {product.variants.length > 0 && (
             <div className="mt-6">
               <h3 className="font-semibold text-gray-900 mb-3">Հասանելի տարբերակներ</h3>
+              {product.variants.some((v) => v.discounted_price != null) && (
+                <div className="mb-3 px-3 py-2 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
+                  Ձեր {Math.round(100 - (product.variants.find((v) => v.discounted_price != null)!.discounted_price! / product.variants.find((v) => v.discounted_price != null)!.price) * 100)}% զեղչը կիրառված է
+                </div>
+              )}
               <div className="space-y-2">
                 {product.variants.map((v) => (
                   <div key={v.id} className="flex items-center justify-between py-2 px-3 bg-gray-50 rounded-lg">
                     <span className="text-sm">
                       {v.size} / {v.color}
                     </span>
-                    <span className="text-sm font-semibold text-brand-800">
-                      {formatCurrency(v.price)}
-                    </span>
+                    <div className="text-right">
+                      {v.discounted_price != null ? (
+                        <>
+                          <div className="text-sm font-semibold text-brand-800">{formatCurrency(v.discounted_price)}</div>
+                          <div className="text-xs text-gray-400 line-through">{formatCurrency(v.price)}</div>
+                        </>
+                      ) : (
+                        <span className="text-sm font-semibold text-brand-800">{formatCurrency(v.price)}</span>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>

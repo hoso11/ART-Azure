@@ -22,6 +22,7 @@ export function EditUserForm({ user, customers }: EditUserFormProps) {
   const [password, setPassword] = useState("");
   const [role, setRole] = useState(user.role);
   const [customerId, setCustomerId] = useState(user.customer_id?.toString() || "");
+  const [discountPercent, setDiscountPercent] = useState(String(user.discount_percent ?? 0));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,6 +34,7 @@ export function EditUserForm({ user, customers }: EditUserFormProps) {
         email,
         role,
         customer_id: customerId ? parseInt(customerId) : null,
+        discount_percent: parseFloat(discountPercent) || 0,
       };
       if (password) {
         body.password = password;
@@ -98,6 +100,20 @@ export function EditUserForm({ user, customers }: EditUserFormProps) {
               ))}
             </Select>
           </FormField>
+
+          {role === "simple_user" && (
+            <FormField label="Զեղչի տոկոս" required>
+              <Input
+                type="number"
+                min="0"
+                max="100"
+                step="0.01"
+                value={discountPercent}
+                onChange={(e) => setDiscountPercent(e.target.value)}
+                required
+              />
+            </FormField>
+          )}
 
           <div className="flex justify-end gap-3 mt-6">
             <Button type="button" variant="secondary" onClick={() => { setOpen(false); setPassword(""); }}>

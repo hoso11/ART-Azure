@@ -66,7 +66,7 @@ async def update_material(
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ):
-    material = await service.update_material(db, material_id, **data.model_dump(exclude_unset=True))
+    material = await service.update_material(db, material_id, admin_user_id=_admin.id, **data.model_dump(exclude_unset=True))
     return schemas.MaterialResponse.model_validate(material)
 
 

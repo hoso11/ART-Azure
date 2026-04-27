@@ -1,10 +1,12 @@
+from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import require_admin, require_authenticated
 from app.orders import service, schemas
-from app.users.models import User
+from app.users.models import User, UserRole
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -68,11 +70,22 @@ async def create_order(
     current_user: User = Depends(require_authenticated),
 ):
     # Simple users can only create orders for their own customer
-    if current_user.role.value == "simple_user":
+    if current_user.role == UserRole.simple_user:
         if current_user.customer_id is None:
             from app.exceptions import ForbiddenException
             raise ForbiddenException(detail="No customer account linked")
         data.customer_id = current_user.customer_id
+
+        # Server-side discount enforcement: override unit_price from DB
+        from app.products.models import ProductVariant
+        discount_factor = (Decimal("100") - Decimal(str(current_user.discount_percent or 0))) / Decimal("100")
+        for item in data.items:
+            result = await db.execute(
+                sa_select(ProductVariant).where(ProductVariant.id == item.product_variant_id)
+            )
+            variant = result.scalar_one_or_none()
+            if variant:
+                item.unit_price = (variant.price * discount_factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     items = [item.model_dump() for item in data.items]
     dump = data.model_dump()

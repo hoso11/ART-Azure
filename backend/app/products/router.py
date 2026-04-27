@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, Query, UploadFile, File
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +12,7 @@ from app.products import service, schemas
 from app.products.schemas import CategoryCreate, CategoryUpdate, CategoryResponse
 from app.storage.interface import get_storage_service, StorageService
 from app.storage.minio_adapter import MinIOStorageService
-from app.users.models import User
+from app.users.models import User, UserRole
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
@@ -41,12 +42,26 @@ def _populate_list_urls(response: schemas.ProductListResponse, storage: StorageS
     return response
 
 
+def _apply_user_discount(response: schemas.ProductResponse, discount_percent: Decimal) -> schemas.ProductResponse:
+    if not discount_percent or discount_percent <= 0:
+        return response
+    factor = (Decimal("100") - discount_percent) / Decimal("100")
+    for variant in response.variants:
+        variant.discounted_price = (variant.price * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return response
+
+
+def _apply_list_discount(response: schemas.ProductListResponse, discount_percent: Decimal) -> schemas.ProductListResponse:
+    for item in response.items:
+        _apply_user_discount(item, discount_percent)
+    return response
+
+
 # ── Categories ──────────────────────────────────────────
 
 @categories_router.get("", response_model=list[CategoryResponse])
 async def list_categories(
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_authenticated),
 ):
     cats = await service.list_categories(db)
     return [CategoryResponse.model_validate(c) for c in cats]
@@ -93,7 +108,7 @@ async def list_products(
     search: str | None = Query(None),
     category_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_authenticated),
+    current_user: User = Depends(require_authenticated),
     storage: StorageService = Depends(get_storage_service),
 ):
     products, total = await service.list_products(db, page, limit, sort_by, sort_order, search, category_id)
@@ -103,7 +118,10 @@ async def list_products(
         page=page,
         limit=limit,
     )
-    return _populate_list_urls(response, storage)
+    _populate_list_urls(response, storage)
+    if current_user.role == UserRole.simple_user:
+        _apply_list_discount(response, current_user.discount_percent)
+    return response
 
 
 @router.get("/public", response_model=schemas.ProductListResponse)
@@ -130,12 +148,15 @@ async def list_public_products(
 async def get_product(
     product_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_authenticated),
+    current_user: User = Depends(require_authenticated),
     storage: StorageService = Depends(get_storage_service),
 ):
     product = await service.get_product_by_id(db, product_id)
     response = schemas.ProductResponse.model_validate(product)
-    return _populate_image_urls(response, storage)
+    _populate_image_urls(response, storage)
+    if current_user.role == UserRole.simple_user:
+        _apply_user_discount(response, current_user.discount_percent)
+    return response
 
 
 @router.post("", response_model=schemas.ProductResponse, status_code=201)

@@ -60,7 +60,7 @@ async def list_users(
     return users, total
 
 
-async def create_user(db: AsyncSession, email: str, password: str, role: str = "simple_user", customer_id: int | None = None) -> User:
+async def create_user(db: AsyncSession, email: str, password: str, role: str = "simple_user", customer_id: int | None = None, discount_percent=0) -> User:
     existing = await get_user_by_email(db, email)
     if existing:
         raise ConflictException(detail=f"User with email {email} already exists")
@@ -70,6 +70,7 @@ async def create_user(db: AsyncSession, email: str, password: str, role: str = "
         hashed_password=hash_password(password),
         role=role,
         customer_id=customer_id,
+        discount_percent=discount_percent,
     )
     db.add(user)
     await db.flush()

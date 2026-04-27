@@ -4,6 +4,7 @@ export interface User {
   role: "admin" | "simple_user";
   is_active: boolean;
   customer_id: number | null;
+  discount_percent: number;
   created_at: string;
 }
 
@@ -32,6 +33,7 @@ export interface ProductVariant {
   color: string;
   price: number;
   stock_quantity: number;
+  discounted_price?: number | null;
 }
 
 export interface ProductImage {

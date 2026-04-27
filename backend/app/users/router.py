@@ -45,7 +45,7 @@ async def create_user(
     _admin: User = Depends(require_admin),
 ):
     user = await service.create_user(
-        db, data.email, data.password, data.role, data.customer_id
+        db, data.email, data.password, data.role, data.customer_id, data.discount_percent
     )
     return schemas.UserResponse.model_validate(user)
 

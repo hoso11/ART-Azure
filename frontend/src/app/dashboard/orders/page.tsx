@@ -122,13 +122,13 @@ export default async function OrdersPage({
       {data && data.total > 20 && (
         <div className="flex justify-center gap-2 mt-4">
           {page > 1 && (
-            <Link href={`/dashboard/orders?page=${page - 1}${filter ? `&filter=${filter}` : ""}`} className="px-3 py-1 text-sm border rounded-lg hover:bg-gray-50">
+            <Link href={`/dashboard/orders?page=${page - 1}${status ? `&status=${status}` : ""}${filter ? `&filter=${filter}` : ""}`} className="px-3 py-1 text-sm border rounded-lg hover:bg-gray-50">
               Previous
             </Link>
           )}
           <span className="px-3 py-1 text-sm text-gray-600">Էջ {page}</span>
           {page * 20 < data.total && (
-            <Link href={`/dashboard/orders?page=${page + 1}${filter ? `&filter=${filter}` : ""}`} className="px-3 py-1 text-sm border rounded-lg hover:bg-gray-50">
+            <Link href={`/dashboard/orders?page=${page + 1}${status ? `&status=${status}` : ""}${filter ? `&filter=${filter}` : ""}`} className="px-3 py-1 text-sm border rounded-lg hover:bg-gray-50">
               Next
             </Link>
           )}

@@ -4,6 +4,7 @@ import { PaginatedResponse, Material } from "@/types";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import Link from "next/link";
+import { AddMaterialButton, EditMaterialButton, DeleteMaterialButton } from "./InventoryListActions";
 
 export default async function InventoryPage({
   searchParams,
@@ -30,7 +31,10 @@ export default async function InventoryPage({
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Պահեստ</h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">Պահեստ</h1>
+        <AddMaterialButton />
+      </div>
 
       {filter === "low_stock" && (
         <div className="mb-4 flex items-center gap-3 px-4 py-2 bg-brand-50 border border-brand-200 rounded-lg text-sm">
@@ -79,9 +83,13 @@ export default async function InventoryPage({
                       )}
                     </td>
                     <td className="px-6 py-4 text-right">
-                      <Link href={`/dashboard/inventory/${material.id}`} className="text-brand-700 hover:underline text-sm">
-                        View
-                      </Link>
+                      <div className="flex items-center justify-end gap-3">
+                        <Link href={`/dashboard/inventory/${material.id}`} className="text-brand-700 hover:text-brand-900 text-sm font-medium">
+                          Տես.
+                        </Link>
+                        <EditMaterialButton material={material} />
+                        <DeleteMaterialButton materialId={material.id} materialName={material.name} />
+                      </div>
                     </td>
                   </tr>
                 );

@@ -1,6 +1,7 @@
 import enum
 from datetime import datetime
-from sqlalchemy import String, Boolean, Integer, ForeignKey, DateTime, Enum
+from decimal import Decimal
+from sqlalchemy import String, Boolean, Integer, ForeignKey, DateTime, Enum, Numeric
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -19,6 +20,7 @@ class User(Base):
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False, default=UserRole.simple_user)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     customer_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("customers.id"), nullable=True)
+    discount_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     customer = relationship("Customer", back_populates="user", lazy="selectin")

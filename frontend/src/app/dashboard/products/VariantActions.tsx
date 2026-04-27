@@ -59,26 +59,26 @@ function VariantForm({
   return (
     <form onSubmit={handleSubmit} className="bg-gray-50 border rounded-lg p-4 mb-4">
       <h4 className="text-sm font-semibold mb-3">
-        {isEdit ? "Խmbed-agrel տarberakat" : "Avelee tarberakat"}
+        {isEdit ? "Խմբագրել տարբերակ" : "Ավելացնել տարբերակ"}
       </h4>
       {error && <p className="text-xs text-red-600 mb-2">{error}</p>}
       <div className="grid grid-cols-2 gap-3">
-        <FormField label="Չafss">
+        <FormField label="Չափս">
           <Input value={size} onChange={(e) => setSize(e.target.value)} required />
         </FormField>
-        <FormField label="Guyyn">
+        <FormField label="Գույն">
           <Input value={color} onChange={(e) => setColor(e.target.value)} required />
         </FormField>
-        <FormField label="Gin">
+        <FormField label="Գին">
           <Input type="number" step="0.01" min="0" value={price} onChange={(e) => setPrice(e.target.value)} required />
         </FormField>
-        <FormField label="Mnatsord">
+        <FormField label="Մնացորդ">
           <Input type="number" min="0" value={stock} onChange={(e) => setStock(e.target.value)} required />
         </FormField>
       </div>
       <div className="flex gap-2 mt-3">
-        <Button type="submit" size="sm" loading={loading}>{isEdit ? "Pahpanel" : "Aveletstanel"}</Button>
-        <Button type="button" size="sm" variant="secondary" onClick={onClose}>Chegharkel</Button>
+        <Button type="submit" size="sm" loading={loading}>{isEdit ? "Պահպանել" : "Ավելացնել"}</Button>
+        <Button type="button" size="sm" variant="secondary" onClick={onClose}>Չեղարկել</Button>
       </div>
     </form>
   );
@@ -250,10 +250,9 @@ function ProductMaterialRequirementsPanel({
 
   return (
     <div className="mt-6 pt-5 border-t border-gray-200">
-      <h3 className="font-semibold text-gray-900 mb-3">Nyut&apos;akan pahanjner / Material Requirements</h3>
+      <h3 className="font-semibold text-gray-900 mb-3">Նյութական պահանջներ</h3>
       <p className="text-xs text-gray-400 mb-3">
-        Defines how much of each material is consumed per finished item per size.
-        Inventory is auto-deducted when variant stock is increased.
+        Սահմանում է, թե յուրաքանչյուր չափսի մեկ պատրաստի արտադրանքի համար որքան նյութ է օգտագործվում։ Պահեստը ավտոմատ նվազեցվում է, երբ տարբերակի մնացորդը ավելացվում է։
       </p>
 
       {loading ? (
@@ -264,10 +263,10 @@ function ProductMaterialRequirementsPanel({
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Nyut / Material</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Chafss / Size</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Qty / item</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Unit</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Նյութ</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Չափս</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Քանակ / մեկ հատի համար</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Չափման միավոր</th>
                   <th className="px-4 py-2 w-20"></th>
                 </tr>
               </thead>
@@ -275,7 +274,7 @@ function ProductMaterialRequirementsPanel({
                 {requirements.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="px-4 py-6 text-center text-sm text-gray-400">
-                      Pahanjner chkan — avelee nakhkin sharan
+                      Պահանջներ չկան — ավելացրեք ստորև
                     </td>
                   </tr>
                 ) : (
@@ -291,13 +290,13 @@ function ProductMaterialRequirementsPanel({
           <div className="mt-3 flex flex-wrap gap-2 items-end">
             {/* Material select — only from existing inventory */}
             <div className="flex flex-col gap-1 flex-1 min-w-[180px]">
-              <label className="text-xs text-gray-500 font-medium">Nyut (Material)</label>
+              <label className="text-xs text-gray-500 font-medium">Նյութ</label>
               <select
                 value={addMaterialId}
                 onChange={(e) => setAddMaterialId(e.target.value)}
                 className="text-sm border border-gray-300 rounded-md px-2 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
               >
-                <option value="">Entrel nyut...</option>
+                <option value="">Ընտրել նյութ...</option>
                 {materials.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.name} ({m.unit}){m.inventory ? ` — ${m.inventory.quantity_on_hand} on hand` : ""}
@@ -308,13 +307,13 @@ function ProductMaterialRequirementsPanel({
 
             {/* Size select — from existing variant sizes */}
             <div className="flex flex-col gap-1 min-w-[120px]">
-              <label className="text-xs text-gray-500 font-medium">Chafss (Size)</label>
+              <label className="text-xs text-gray-500 font-medium">Չափս</label>
               <select
                 value={addSize}
                 onChange={(e) => setAddSize(e.target.value)}
                 className="text-sm border border-gray-300 rounded-md px-2 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500"
               >
-                <option value="">Entrel chafss...</option>
+                <option value="">Ընտրել չափս...</option>
                 {variantSizes.map((s) => (
                   <option key={s} value={s}>{s}</option>
                 ))}
@@ -324,7 +323,7 @@ function ProductMaterialRequirementsPanel({
             {/* Qty/item */}
             <div className="flex flex-col gap-1 w-28">
               <label className="text-xs text-gray-500 font-medium">
-                Qty/item{selectedMaterial ? ` (${selectedMaterial.unit})` : ""}
+                Քանակ / մեկ հատի համար{selectedMaterial ? ` (${selectedMaterial.unit})` : ""}
               </label>
               <input
                 type="number"
@@ -342,7 +341,7 @@ function ProductMaterialRequirementsPanel({
                 disabled={saving || !addMaterialId || !addSize || !addQty}
                 className="text-sm px-4 py-1.5 bg-brand-800 text-white rounded-md hover:bg-brand-900 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {saving ? "..." : "+ Avelee"}
+                {saving ? "..." : "+ Ավելացնել"}
               </button>
             </div>
           </div>
@@ -351,7 +350,7 @@ function ProductMaterialRequirementsPanel({
 
           {variantSizes.length === 0 && (
             <p className="text-xs text-amber-600 mt-2">
-              Create at least one variant first — sizes come from existing variants.
+              Նախ ստեղծեք գոնե մեկ տարբերակ — չափսերը գալիս են գոյություն ունեցող տarberakat-ներից։
             </p>
           )}
         </>
@@ -392,13 +391,13 @@ export function VariantManager({ productId, variants }: { productId: number; var
   return (
     <>
       <div className="flex items-center justify-between">
-        <h3 className="font-semibold">Tarberakat-ner</h3>
+        <h3 className="font-semibold">Տարբերակատ-ներ</h3>
         <button
           type="button"
           onClick={() => { setShowAdd(true); setEditId(null); }}
           className="text-xs font-medium text-brand-700 hover:text-brand-900"
         >
-          + Add Variant
+          + Ավելացնել տարբերակ
         </button>
       </div>
 
@@ -412,16 +411,16 @@ export function VariantManager({ productId, variants }: { productId: number; var
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Chafss</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Guyyn</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Gin</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Mnatsord</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Չափս</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Գույն</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Գին</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Մնացորդ</th>
               <th className="px-6 py-3 w-24"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200">
             {variants.length === 0 && (
-              <tr><td colSpan={5} className="px-6 py-8 text-center text-gray-500 text-sm">Tarberakat-ner chkan</td></tr>
+              <tr><td colSpan={5} className="px-6 py-8 text-center text-gray-500 text-sm">Տարբերակատ-ներ չկան</td></tr>
             )}
             {variants.map((v) => (
               <React.Fragment key={v.id}>

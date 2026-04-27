@@ -51,6 +51,12 @@ export default async function UserDetailPage({
               </dd>
             </div>
             <div><dt className="text-xs text-gray-500">Հաճախորդի կապ</dt><dd className="text-sm">{user.customer_id ? <Link href={`/dashboard/customers/${user.customer_id}`} className="text-brand-700 hover:underline">Customer #{user.customer_id}</Link> : "Կապված չէ"}</dd></div>
+            {user.role === "simple_user" && (
+              <div>
+                <dt className="text-xs text-gray-500">Զեղչի տոկոս</dt>
+                <dd className="text-sm font-medium text-brand-800">{Number(user.discount_percent)}%</dd>
+              </div>
+            )}
             <div>
               <dt className="text-xs text-gray-500">Կարգավիճակ</dt>
               <dd>

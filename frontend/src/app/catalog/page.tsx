@@ -36,8 +36,15 @@ export default async function CatalogPage({
           </div>
         )}
         {data?.items.map((product) => {
-          const minPrice = product.variants.length
+          const hasDiscount = product.variants.some((v) => v.discounted_price != null);
+          const minOriginal = product.variants.length
             ? Math.min(...product.variants.map((v) => v.price))
+            : 0;
+          const minDiscounted = hasDiscount
+            ? Math.min(...product.variants.filter((v) => v.discounted_price != null).map((v) => v.discounted_price!))
+            : null;
+          const discountPct = hasDiscount && minOriginal > 0 && minDiscounted != null
+            ? Math.round(100 - (minDiscounted / minOriginal) * 100)
             : 0;
           const imageUrl = getProductPrimaryImage(product);
           return (
@@ -61,9 +68,21 @@ export default async function CatalogPage({
                   <h3 className="font-semibold text-gray-900 mt-1">{product.name}</h3>
                   <p className="text-sm text-gray-500 mt-1 line-clamp-2">{product.description}</p>
                   <div className="mt-3">
-                    <span className="text-brand-800 font-semibold">
-                      {minPrice > 0 ? `Սկսած ${formatCurrency(minPrice)}` : "Կապվեք գնի համար"}
-                    </span>
+                    {minOriginal > 0 ? (
+                      hasDiscount && minDiscounted != null ? (
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-brand-800 font-semibold">{`Սկսած ${formatCurrency(minDiscounted)}`}</span>
+                            <span className="text-xs bg-green-100 text-green-800 px-1.5 py-0.5 rounded font-medium">-{discountPct}%</span>
+                          </div>
+                          <span className="text-xs text-gray-400 line-through">{formatCurrency(minOriginal)}</span>
+                        </div>
+                      ) : (
+                        <span className="text-brand-800 font-semibold">{`Սկսած ${formatCurrency(minOriginal)}`}</span>
+                      )
+                    ) : (
+                      <span className="text-brand-800 font-semibold">Կապվեք գնի համար</span>
+                    )}
                   </div>
                   <p className="text-xs text-gray-400 mt-1">{product.variants.length} տարբերակներ հասանելի</p>
                 </div>

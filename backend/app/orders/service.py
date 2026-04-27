@@ -96,7 +96,13 @@ async def update_order(db: AsyncSession, order_id: int, **kwargs) -> Order:
 
     transitioned_to_production = False
     if "status" in kwargs and kwargs["status"]:
-        new_status = OrderStatus(kwargs["status"])
+        try:
+            new_status = OrderStatus(kwargs["status"])
+        except ValueError:
+            raise ValidationException(
+                detail=f"Invalid status: {kwargs['status']}",
+                code="invalid_status",
+            )
         current_status = order.status
         if new_status not in VALID_TRANSITIONS.get(current_status, []):
             raise ValidationException(

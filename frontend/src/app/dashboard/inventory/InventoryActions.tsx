@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Material } from "@/types";
 import { Button } from "@/components/ui/Button";
@@ -16,6 +16,17 @@ export function EditMaterialForm({ material }: { material: Material }) {
   const [description, setDescription] = useState(material.description || "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (open) {
+      setName(material.name);
+      setSku(material.sku);
+      setUnit(material.unit);
+      setThreshold(String(material.low_stock_threshold));
+      setDescription(material.description || "");
+      setError("");
+    }
+  }, [open, material]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -91,20 +102,25 @@ export function DeleteMaterialButton({ materialId, materialName }: { materialId:
   const router = useRouter();
   const [confirming, setConfirming] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   const handleDelete = async () => {
     setLoading(true);
+    setError("");
     try {
       const res = await fetch(`/api/v1/inventory/materials/${materialId}`, {
         method: "DELETE",
         credentials: "include",
       });
-      if (res.ok || res.status === 204) {
+      if (res.status === 204 || res.ok) {
         router.push("/dashboard/inventory");
         router.refresh();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.detail || "Չhajogvets jnjel");
       }
     } catch {
-      // ignore
+      setError("Connection error");
     } finally {
       setLoading(false);
     }
@@ -125,11 +141,12 @@ export function DeleteMaterialButton({ materialId, materialName }: { materialId:
         <p className="text-sm text-gray-600 mb-4">
           Are you sure you want to delete <strong>{materialName}</strong>? This cannot be undone.
         </p>
+        {error && <p className="text-sm text-red-600 mb-3">{error}</p>}
         <div className="flex gap-2">
           <Button onClick={handleDelete} loading={loading} className="bg-red-600 hover:bg-red-700">
             Delete
           </Button>
-          <Button variant="secondary" onClick={() => setConfirming(false)}>Չեղարկել</Button>
+          <Button variant="secondary" onClick={() => { setConfirming(false); setError(""); }}>Չեղարկել</Button>
         </div>
       </div>
     </div>

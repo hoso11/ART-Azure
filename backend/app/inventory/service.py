@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from loguru import logger
 
+from sqlalchemy.exc import IntegrityError
+
 from app.inventory.models import Material, Inventory, StockMovement
 from app.exceptions import NotFoundException, ConflictException
 
@@ -49,24 +51,30 @@ async def create_material(db: AsyncSession, **kwargs) -> Material:
     if existing.scalar_one_or_none():
         raise ConflictException(detail=f"Material with SKU {kwargs['sku']} already exists")
 
+    initial_qty = Decimal(str(kwargs.pop("quantity_on_hand", 0)))
     material = Material(**kwargs)
     db.add(material)
     await db.flush()
 
-    # Create inventory record
-    inventory = Inventory(material_id=material.id, quantity_on_hand=Decimal("0"))
+    inventory = Inventory(material_id=material.id, quantity_on_hand=initial_qty)
     db.add(inventory)
     await db.flush()
     await db.refresh(material)
     return material
 
 
-async def update_material(db: AsyncSession, material_id: int, **kwargs) -> Material:
+async def update_material(db: AsyncSession, material_id: int, admin_user_id: int | None = None, **kwargs) -> Material:
     material = await get_material_by_id(db, material_id)
+    new_qty = kwargs.pop("quantity_on_hand", None)
     for k, v in kwargs.items():
         if v is not None:
             setattr(material, k, v)
     await db.flush()
+    if new_qty is not None and admin_user_id is not None:
+        current_qty = material.inventory.quantity_on_hand if material.inventory else Decimal("0")
+        delta = Decimal(str(new_qty)) - current_qty
+        if delta != 0:
+            await create_stock_movement(db, material_id, delta, "adjustment", admin_user_id)
     await db.refresh(material)
     return material
 
@@ -74,7 +82,13 @@ async def update_material(db: AsyncSession, material_id: int, **kwargs) -> Mater
 async def delete_material(db: AsyncSession, material_id: int) -> None:
     material = await get_material_by_id(db, material_id)
     await db.delete(material)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        raise ConflictException(
+            detail="Cannot delete material: it is referenced by product size requirements",
+            code="material_in_use",
+        )
 
 
 # ── Stock Movements ─────────────────────────────────────

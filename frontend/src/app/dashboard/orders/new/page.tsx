@@ -56,11 +56,17 @@ export default function NewOrderPage() {
   }, []);
 
   const allVariants = products.flatMap((p) =>
-    p.variants.map((v) => ({
-      id: v.id,
-      label: `${p.name} — ${v.size} / ${v.color} (${formatCurrency(v.price)})`,
-      price: v.price,
-    }))
+    p.variants.map((v) => {
+      const effectivePrice = v.discounted_price ?? v.price;
+      const priceLabel = v.discounted_price != null
+        ? `${formatCurrency(v.discounted_price)} (${formatCurrency(v.price)})`
+        : formatCurrency(v.price);
+      return {
+        id: v.id,
+        label: `${p.name} — ${v.size} / ${v.color} (${priceLabel})`,
+        price: effectivePrice,
+      };
+    })
   );
 
   const addItem = () => setItems([...items, { variant_id: "", quantity: "1", price: "0" }]);

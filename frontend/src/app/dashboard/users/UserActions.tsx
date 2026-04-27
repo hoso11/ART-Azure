@@ -21,12 +21,14 @@ export function CreateUserButton({ customers }: CreateUserButtonProps) {
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("simple_user");
   const [customerId, setCustomerId] = useState("");
+  const [discountPercent, setDiscountPercent] = useState("0");
 
   const resetForm = () => {
     setEmail("");
     setPassword("");
     setRole("simple_user");
     setCustomerId("");
+    setDiscountPercent("0");
     setError("");
   };
 
@@ -46,6 +48,7 @@ export function CreateUserButton({ customers }: CreateUserButtonProps) {
           role,
           is_active: true,
           customer_id: customerId ? parseInt(customerId) : null,
+          discount_percent: parseFloat(discountPercent) || 0,
         }),
       });
 
@@ -102,6 +105,20 @@ export function CreateUserButton({ customers }: CreateUserButtonProps) {
               ))}
             </Select>
           </FormField>
+
+          {role === "simple_user" && (
+            <FormField label="Զեղչի տոկոս" required>
+              <Input
+                type="number"
+                min="0"
+                max="100"
+                step="0.01"
+                value={discountPercent}
+                onChange={(e) => setDiscountPercent(e.target.value)}
+                required
+              />
+            </FormField>
+          )}
 
           <div className="flex justify-end gap-3 mt-6">
             <Button type="button" variant="secondary" onClick={() => { setOpen(false); resetForm(); }}>

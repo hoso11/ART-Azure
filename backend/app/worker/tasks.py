@@ -73,9 +73,7 @@ def send_order_notification(order_id: int, new_status: str, customer_email: str)
             f"— {settings.app_name}"
         )
 
-        asyncio.get_event_loop().run_until_complete(
-            service.send_email(customer_email, subject, body)
-        )
+        asyncio.run(service.send_email(customer_email, subject, body))
     except Exception as e:
         logger.error("task.send_order_notification.failed", order_id=order_id, error=str(e))
 
@@ -98,9 +96,7 @@ def send_low_stock_alert(material_name: str, current_qty: float, threshold: floa
             f"— {settings.app_name}"
         )
 
-        asyncio.get_event_loop().run_until_complete(
-            service.send_email(admin_email, subject, body)
-        )
+        asyncio.run(service.send_email(admin_email, subject, body))
     except Exception as e:
         logger.error("task.send_low_stock_alert.failed", material=material_name, error=str(e))
 
