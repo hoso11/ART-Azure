@@ -15,7 +15,16 @@
       "Bash(docker compose *)",
       "Bash(echo \"exit=$?\")",
       "Bash(rm -f .env.azure.test)",
-      "PowerShell(Get-Command *)"
+      "PowerShell(Get-Command *)",
+      "Bash(docker-compose exec *)",
+      "Bash(curl -s -X POST http://localhost/api/v1/auth/login -H \"Content-Type: application/json\" -d \"{\\\\\"email\\\\\":\\\\\"admin@art-manufacturing.com\\\\\",\\\\\"password\\\\\":\\\\\"admin123456\\\\\"}\" -c /tmp/frontend_cookies.txt -b /tmp/frontend_cookies.txt)",
+      "Bash(curl -s http://localhost/dashboard/production/1 -b /tmp/frontend_cookies.txt)",
+      "Bash(docker-compose restart *)",
+      "Bash(curl -s -X POST http://localhost/api/v1/auth/login -H \"Content-Type: application/json\" -d \"{\\\\\"email\\\\\":\\\\\"admin@art-manufacturing.com\\\\\",\\\\\"password\\\\\":\\\\\"admin123456\\\\\"}\" -c /tmp/fc2.txt -b /tmp/fc2.txt)",
+      "Bash(curl -s http://localhost/dashboard/production/1 -b /tmp/fc2.txt)",
+      "Bash(curl -s -o /tmp/prod_detail.html -w \"%{http_code}\" http://localhost/dashboard/production/1 -b /tmp/fc2.txt)",
+      "Bash(docker-compose logs *)",
+      "Bash(docker cp *)"
     ]
   }
 }

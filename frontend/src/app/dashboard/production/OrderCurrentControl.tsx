@@ -29,50 +29,28 @@ const STATUS_LABELS: Record<string, string> = {
   completed: "Ավարտված",
 };
 
-export function StageStatusChange({
-  stageId,
-  stageName,
+export function OrderCurrentControl({
+  orderId,
+  currentStage,
   currentStatus,
 }: {
-  stageId: number;
-  stageName: string;
+  orderId: number;
+  currentStage: string;
   currentStatus: string;
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
 
-  const patchStage = async (newStage: string) => {
-    if (newStage === stageName) return;
+  const patch = async (next: { current_stage: string; current_status: string }) => {
     setBusy(true);
     try {
-      const res = await clientFetch(`/production/${stageId}`, {
+      const res = await clientFetch(`/production/orders/${orderId}/current`, {
         method: "PATCH",
-        body: JSON.stringify({ stage_name: newStage }),
+        body: JSON.stringify(next),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        showToast(data.detail || "Չհաջողվեց փոխել փուլը", "error");
-        return;
-      }
-      router.refresh();
-    } catch {
-      showToast("Կապի սխալ", "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const putStatus = async (newStatus: string) => {
-    if (newStatus === currentStatus) return;
-    setBusy(true);
-    try {
-      const res = await clientFetch(`/production/${stageId}/stage-status`, {
-        method: "PUT",
-        body: JSON.stringify({ status: newStatus }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        showToast(data.detail || "Չհաջողվեց փոխել կարգավիճակը", "error");
+        showToast(data.detail || "Չհաջողվեց փոխել", "error");
         return;
       }
       router.refresh();
@@ -86,9 +64,11 @@ export function StageStatusChange({
   return (
     <div className="flex items-center gap-2 whitespace-nowrap">
       <select
-        value={stageName}
+        value={currentStage}
         disabled={busy}
-        onChange={(e) => patchStage(e.target.value)}
+        onChange={(e) =>
+          patch({ current_stage: e.target.value, current_status: currentStatus })
+        }
         className="text-xs rounded border border-gray-300 px-2 py-1 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 disabled:opacity-60 disabled:cursor-not-allowed"
         title="Փոխել փուլը"
       >
@@ -102,7 +82,9 @@ export function StageStatusChange({
       <select
         value={currentStatus}
         disabled={busy}
-        onChange={(e) => putStatus(e.target.value)}
+        onChange={(e) =>
+          patch({ current_stage: currentStage, current_status: e.target.value })
+        }
         className="text-xs rounded border border-gray-300 px-2 py-1 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 disabled:opacity-60 disabled:cursor-not-allowed"
         title="Փոխել կարգավիճակը"
       >

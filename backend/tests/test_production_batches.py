@@ -232,8 +232,7 @@ async def test_missing_material_requirements_returns_clear_error(
     assert resp.status_code == 422
     body = resp.json()
     assert body.get("code") == "no_material_requirements"
-    # The error message should mention the size so the admin knows where to add requirements
-    assert "XL" in body.get("detail", "")
+    assert body.get("detail") == "Տվյալ ապրանքը արտադրելու համար համապատասխան նյութեր սահմանված չեն։"
 
 
 @pytest.mark.asyncio

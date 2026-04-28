@@ -2,22 +2,33 @@ from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel
 
+from app.production.models import StageName, StageStatus
+
+
+# ── Order-based ProductionStage ──────────────────────────
 
 class ProductionStageCreate(BaseModel):
-    order_id: int
-    stage_name: str
-    assigned_to: Optional[int] = None
-    notes: Optional[str] = None
+    """Used by POST /orders/{order_id}/stages to seed all five stages."""
+    pass
 
 
 class ProductionStageUpdate(BaseModel):
-    status: Optional[str] = None
-    assigned_to: Optional[int] = None
-    notes: Optional[str] = None
+    """Move a stage forward — admin sets the next stage_name."""
+    stage_name: StageName
 
 
 class StageStatusUpdate(BaseModel):
-    status: str
+    """Change just the status of a stage (pending → in_progress → completed)."""
+    status: StageStatus
+    note: Optional[str] = None
+
+
+class OrderCurrentUpdate(BaseModel):
+    """Set the displayed (current_stage, current_status) for an order. Plain
+    str so the service layer can raise a typed ValidationException with a
+    `code` field on bad values."""
+    current_stage: str
+    current_status: str
     note: Optional[str] = None
 
 
@@ -25,8 +36,8 @@ class ProductionLogResponse(BaseModel):
     id: int
     production_stage_id: int
     changed_by: int
-    previous_status: str
-    new_status: str
+    previous_status: StageStatus
+    new_status: StageStatus
     note: Optional[str] = None
     created_at: datetime
 
@@ -36,8 +47,8 @@ class ProductionLogResponse(BaseModel):
 class ProductionStageResponse(BaseModel):
     id: int
     order_id: int
-    stage_name: str
-    status: str
+    stage_name: StageName
+    status: StageStatus
     assigned_to: Optional[int] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None

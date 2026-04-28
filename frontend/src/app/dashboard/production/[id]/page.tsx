@@ -6,6 +6,14 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { formatDateTime } from "@/lib/utils";
 import Link from "next/link";
 
+const STAGE_LABELS: Record<string, string> = {
+  cutting: "Կտրում",
+  sewing: "Մշակում",
+  quality_control: "Որակի վերահսկում",
+  packaging: "Փաթեթավորում",
+  ready_for_shipment: "Պատրաստ է առաքման",
+};
+
 export default async function ProductionDetailPage({
   params,
 }: {
@@ -23,8 +31,8 @@ export default async function ProductionDetailPage({
     <div>
       <Link href="/dashboard/production" className="text-sm text-brand-700 hover:underline">&larr; Վերադառնալ արտադրությանը</Link>
       <div className="flex items-center gap-3 mt-1 mb-6">
-        <h1 className="text-2xl font-bold text-gray-900 capitalize">
-          {{"cutting": "Կտրում", "sewing": "Կարում", "quality_control": "Որակի վերահսկում", "packaging": "Փաթեթավորում", "ready_for_shipment": "Պատրաստ է առաքման"}[stage.stage_name] || stage.stage_name.replace(/_/g, " ")}
+        <h1 className="text-2xl font-bold text-gray-900">
+          {STAGE_LABELS[stage.stage_name] || stage.stage_name.replace(/_/g, " ")}
         </h1>
         <StatusBadge status={stage.status} />
       </div>

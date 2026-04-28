@@ -11,6 +11,23 @@ class OrderItemCreate(BaseModel):
     notes: Optional[str] = None
 
 
+class OrderItemProductBrief(BaseModel):
+    id: int
+    name: str
+    sku: str
+
+    model_config = {"from_attributes": True}
+
+
+class OrderItemVariantBrief(BaseModel):
+    id: int
+    size: str
+    color: str
+    product: Optional[OrderItemProductBrief] = None
+
+    model_config = {"from_attributes": True}
+
+
 class OrderItemResponse(BaseModel):
     id: int
     order_id: int
@@ -20,6 +37,7 @@ class OrderItemResponse(BaseModel):
     notes: Optional[str] = None
     fulfilled_from_stock: int = 0
     production_quantity: int = 0
+    product_variant: Optional[OrderItemVariantBrief] = None
 
     model_config = {"from_attributes": True}
 

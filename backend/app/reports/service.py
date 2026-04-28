@@ -388,8 +388,8 @@ async def get_production_report(
         {
             "id": r.id,
             "order_id": r.order_id,
-            "stage_name": r.stage_name.value if hasattr(r.stage_name, "value") else r.stage_name,
-            "status": r.status.value if hasattr(r.status, "value") else r.status,
+            "stage_name": r.stage_name.value,
+            "status": r.status.value,
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "completed_at": r.completed_at.isoformat() if r.completed_at else None,
         }

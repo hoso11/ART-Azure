@@ -73,9 +73,19 @@ export default async function OrderDetailPage({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {order.items.map((item) => (
+                  {order.items.map((item) => {
+                    const variant = item.product_variant;
+                    const productName = variant?.product?.name ?? `Տարբերակ #${item.product_variant_id}`;
+                    return (
                     <tr key={item.id}>
-                      <td className="px-6 py-4 text-sm">Տարբերակ #{item.product_variant_id}</td>
+                      <td className="px-6 py-4 text-sm">
+                        <div className="font-medium text-gray-900">{productName}</div>
+                        {variant && (
+                          <div className="text-xs text-gray-500 mt-0.5">
+                            Չափս: {variant.size} · Գույն: {variant.color}
+                          </div>
+                        )}
+                      </td>
                       <td className="px-6 py-4 text-sm">{item.quantity}</td>
                       {order.status !== "draft" && (
                         <>
@@ -86,7 +96,8 @@ export default async function OrderDetailPage({
                       <td className="px-6 py-4 text-sm">{formatCurrency(item.unit_price)}</td>
                       <td className="px-6 py-4 text-sm font-medium">{formatCurrency(item.quantity * item.unit_price)}</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
                 <tfoot className="bg-gray-50">
                   <tr>
@@ -106,8 +117,8 @@ export default async function OrderDetailPage({
                   {stages.map((stage) => (
                     <div key={stage.id} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
                       <div>
-                        <span className="text-sm font-medium capitalize">
-                          {{"cutting": "Կտրում", "sewing": "Կարում", "quality_control": "Որակի վերահսկում", "packaging": "Փաթեթավորում", "ready_for_shipment": "Պատրաստ է առաքման"}[stage.stage_name] || stage.stage_name.replace(/_/g, " ")}
+                        <span className="text-sm font-medium">
+                          {{"cutting": "Կտրում", "sewing": "Մշակում", "quality_control": "Որակի վերահսկում", "packaging": "Փաթեթավորում", "ready_for_shipment": "Պատրաստ է առաքման"}[stage.stage_name] || stage.stage_name.replace(/_/g, " ")}
                         </span>
                         {stage.started_at && (
                           <span className="text-xs text-gray-500 ml-2">

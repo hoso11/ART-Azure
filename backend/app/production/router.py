@@ -19,12 +19,22 @@ async def list_stages(
     order_id: int | None = Query(None),
     status: str | None = Query(None),
     active: bool = Query(False),
+    one_per_order: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ):
-    stages, total = await service.list_stages(
-        db, page, limit, sort_by, sort_order, order_id, status, active_only=active
-    )
+    if one_per_order:
+        # Aggregated view: one row per order, picked deterministically by
+        # service.compute_current. Status filter applies to the COMPUTED
+        # current status. order_id/sort_by are ignored in this mode.
+        stages, total = await service.list_one_per_order(
+            db, page=page, limit=limit, sort_order=sort_order,
+            status=status, active_only=active,
+        )
+    else:
+        stages, total = await service.list_stages(
+            db, page, limit, sort_by, sort_order, order_id, status, active_only=active
+        )
     return schemas.ProductionStageListResponse(
         items=[schemas.ProductionStageResponse.model_validate(s) for s in stages],
         total=total,
@@ -154,7 +164,30 @@ async def complete_production_batch(
     return schemas.ProductionBatchResponse.model_validate(batch)
 
 
-# ── Order-based production stages (legacy / unchanged) ──
+# ── Order-based ProductionStage endpoints ────────────────
+
+@router.post(
+    "/orders/{order_id}/stages",
+    response_model=list[schemas.ProductionStageResponse],
+    status_code=201,
+)
+async def create_stages_for_order(
+    order_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Seed the five default stages for an order. Idempotent."""
+    stages = await service.create_stages_for_order(db, order_id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="production.stages_created",
+        entity_type="production_stage",
+        entity_id=order_id,
+        new_values={"order_id": order_id, "stage_count": len(stages)},
+    )
+    return [schemas.ProductionStageResponse.model_validate(s) for s in stages]
+
 
 @router.get("/{stage_id}", response_model=schemas.ProductionStageResponse)
 async def get_stage(
@@ -166,16 +199,6 @@ async def get_stage(
     return schemas.ProductionStageResponse.model_validate(stage)
 
 
-@router.post("/orders/{order_id}/stages", response_model=list[schemas.ProductionStageResponse], status_code=201)
-async def create_stages_for_order(
-    order_id: int,
-    db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
-):
-    stages = await service.create_stages_for_order(db, order_id)
-    return [schemas.ProductionStageResponse.model_validate(s) for s in stages]
-
-
 @router.patch("/{stage_id}", response_model=schemas.ProductionStageResponse)
 async def update_stage(
     stage_id: int,
@@ -185,21 +208,22 @@ async def update_stage(
     admin: User = Depends(require_admin),
 ):
     existing = await service.get_stage_by_id(db, stage_id)
-    old_status = existing.status.value if hasattr(existing.status, "value") else existing.status
-    stage = await service.update_stage(db, stage_id, changed_by=admin.id, **data.model_dump(exclude_unset=True))
-    new_status = stage.status.value if hasattr(stage.status, "value") else stage.status
-    if old_status != new_status:
+    old_stage = existing.stage_name
+    stage = await service.update_stage(db, stage_id, new_stage_name=data.stage_name)
+    if old_stage != stage.stage_name:
         await activity_service.log_activity(
             db, user=admin, request=request,
-            action="production.stage_updated", entity_type="production_stage", entity_id=stage.id,
-            old_values={"status": old_status},
-            new_values={"status": new_status},
+            action="production.stage_updated",
+            entity_type="production_stage",
+            entity_id=stage.id,
+            old_values={"stage_name": old_stage.value},
+            new_values={"stage_name": stage.stage_name.value},
         )
     return schemas.ProductionStageResponse.model_validate(stage)
 
 
 @router.put("/{stage_id}/stage-status", response_model=schemas.ProductionStageResponse)
-async def set_stage_status(
+async def update_stage_status(
     stage_id: int,
     data: schemas.StageStatusUpdate,
     request: Request,
@@ -207,16 +231,58 @@ async def set_stage_status(
     admin: User = Depends(require_admin),
 ):
     existing = await service.get_stage_by_id(db, stage_id)
-    old_status = existing.status.value if hasattr(existing.status, "value") else existing.status
+    old_status = existing.status
     stage = await service.update_stage_status(
-        db, stage_id, new_status=data.status, changed_by=admin.id, note=data.note
+        db, stage_id, new_status=data.status, changed_by=admin.id, note=data.note,
     )
-    new_status = stage.status.value if hasattr(stage.status, "value") else stage.status
-    await activity_service.log_activity(
-        db, user=admin, request=request,
-        action="production.stage_status_changed", entity_type="production_stage", entity_id=stage.id,
-        old_values={"status": old_status},
-        new_values={"status": new_status},
-        details=data.note,
-    )
+    if old_status != stage.status:
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="production.stage_status_changed",
+            entity_type="production_stage",
+            entity_id=stage.id,
+            old_values={"status": old_status.value},
+            new_values={"status": stage.status.value},
+            details=data.note,
+        )
     return schemas.ProductionStageResponse.model_validate(stage)
+
+
+# ── One-row-per-order admin control ──────────────────────
+
+@router.patch(
+    "/orders/{order_id}/current",
+    response_model=schemas.ProductionStageResponse,
+)
+async def set_order_current(
+    order_id: int,
+    data: schemas.OrderCurrentUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Set the displayed (current_stage, current_status) for an order. May
+    update multiple ProductionStage rows under the hood (to keep at most one
+    in_progress) but emits a single ActivityLog entry."""
+    chosen, old_stage, old_status, new_stage, new_status = await service.set_order_current(
+        db, order_id,
+        new_stage=data.current_stage, new_status=data.current_status,
+        changed_by=admin.id, note=data.note,
+    )
+    if (old_stage, old_status) != (new_stage, new_status):
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="production.order_current_changed",
+            entity_type="production_stage",
+            entity_id=order_id,
+            old_values={
+                "current_stage": old_stage.value,
+                "current_status": old_status.value,
+            },
+            new_values={
+                "current_stage": new_stage.value,
+                "current_status": new_status.value,
+            },
+            details=data.note,
+        )
+    return schemas.ProductionStageResponse.model_validate(chosen)

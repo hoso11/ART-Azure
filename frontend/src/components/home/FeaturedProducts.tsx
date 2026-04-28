@@ -21,42 +21,6 @@ function getProductPrimaryImage(product: Product): string | null {
   return null;
 }
 
-// Translation maps for product data coming from the API
-const categoryNames: Record<string, string> = {
-  Trousers: "Տաբատներ",
-  Shirts: "Շապիկներ",
-  Jackets: "Բաճկոններ",
-  Uniforms: "Համազգեստներ",
-  Dresses: "Զգեստներ",
-};
-
-const productNames: Record<string, string> = {
-  "Cargo Trousers": "Կարգո տաբատ",
-  "Formal Dress Shirt": "Պաշտոնական վերնաշապիկ",
-  "Denim Work Jacket": "Ջինսե աշխատանքային բաճկոն",
-  "Corporate Polo Uniform": "Կորպորատիվ պոլո համազգեստ",
-  "Summer Linen Dress": "Ամառային կտավատի զգեստ",
-  "Wool Blend Blazer": "Բրդյա խառնուրդով բլեյզեր",
-  "Slim Fit Chinos": "Նեղ ձևվածքի չինոս",
-  "Classic Oxford Shirt": "Դասական օքսֆորդ վերնաշապիկ",
-};
-
-const productDescriptions: Record<string, string> = {
-  "Multi-pocket cargo trousers": "Բազմագրպան կարգո տաբատ",
-  "Tailored formal dress shirt": "Կարված պաշտոնական վերնաշապիկ",
-  "Heavy-duty denim work jacket": "Ամուր և գործնական ջինսե աշխատանքային բաճկոն",
-  "Branded corporate polo": "Բրենդավորված կորպորատիվ պոլո",
-  "Light summer linen dress": "Թեթև ամառային կտավատի զգեստ",
-  "Tailored wool blend blazer": "Կարված բրդյա խառնուրդով բլեյզեր",
-  "Modern slim fit chinos": "Պամանակակից նեղ ձևվածքի չինոս",
-  "Timeless oxford button-down shirt": "Դասական օքսֆորդ ոճի կոճկվող վերնաշապիկ",
-};
-
-function t(map: Record<string, string>, key: string | undefined | null): string {
-  if (!key) return "";
-  return map[key] || key;
-}
-
 export function FeaturedProducts({ products }: FeaturedProductsProps) {
   if (products.length === 0) return null;
 
@@ -85,7 +49,7 @@ export function FeaturedProducts({ products }: FeaturedProductsProps) {
                   {imageUrl ? (
                     <img
                       src={imageUrl}
-                      alt={t(productNames, product.name)}
+                      alt={product.name}
                       className="w-full h-full object-cover"
                     />
                   ) : (
@@ -93,9 +57,9 @@ export function FeaturedProducts({ products }: FeaturedProductsProps) {
                   )}
                 </div>
                 <div className="p-4">
-                  <p className="text-xs text-brand-500 font-medium uppercase">{t(categoryNames, product.category?.name)}</p>
-                  <h3 className="font-semibold text-gray-900 mt-1">{t(productNames, product.name)}</h3>
-                  <p className="text-sm text-gray-500 mt-1 line-clamp-2">{t(productDescriptions, product.description)}</p>
+                  <p className="text-xs text-brand-500 font-medium uppercase">{product.category?.name}</p>
+                  <h3 className="font-semibold text-gray-900 mt-1">{product.name}</h3>
+                  <p className="text-sm text-gray-500 mt-1 line-clamp-2">{product.description}</p>
                   <div className="mt-3 flex items-center justify-between">
                     <span className="text-brand-800 font-semibold">
                       {minPrice > 0 ? `Սկսած ${formatCurrency(minPrice)}-ից` : "Կապվեք գնագոյացման համար"}

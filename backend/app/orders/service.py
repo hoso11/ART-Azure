@@ -146,10 +146,7 @@ async def _fulfill_order_items(
 
         if not requirements:
             raise ValidationException(
-                detail=(
-                    f"No material requirements defined for product ID {variant.product_id} "
-                    f"size '{variant.size}'. Define requirements before confirming."
-                ),
+                detail="Տվյալ ապրանքը արտադրելու համար համապատասխան նյութեր սահմանված չեն։",
                 code="no_material_requirements",
             )
 
@@ -248,11 +245,11 @@ async def update_order(db: AsyncSession, order_id: int, admin_user_id: int | Non
 
     await db.flush()
 
-    # Side-effect: when an order enters production, seed an initial production
-    # stage (cutting/pending) if none exists yet. Idempotent — re-saves are no-ops.
+    # Side-effect: when an order enters production, seed the five default
+    # ProductionStage rows (idempotent — no-op if any already exist).
     if transitioned_to_production:
-        from app.production.service import ensure_initial_stage
-        await ensure_initial_stage(db, order_id)
+        from app.production.service import create_stages_for_order
+        await create_stages_for_order(db, order_id)
 
     # Side-effect: draft → confirmed validates and deducts inventory materials.
     # The entire block runs inside the same DB transaction; a ValidationException

@@ -5,12 +5,13 @@ import { Card, CardContent } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { formatDate } from "@/lib/utils";
 import Link from "next/link";
-import { StageStatusChange } from "./StageStatusChange";
+import { OrderCurrentControl } from "./OrderCurrentControl";
 import { CreateBatchButton } from "./CreateBatchButton";
 import { BatchControl } from "./BatchControl";
 
-const BATCH_STAGE_LABELS: Record<string, string> = {
+const STAGE_LABELS: Record<string, string> = {
   cutting: "Կտրում",
+  sewing: "Մշակում",
   processing: "Մշակում",
   quality_control: "Որակի վերահսկում",
   packaging: "Փաթեթավորում",
@@ -28,10 +29,7 @@ export default async function ProductionPage({
   const page = parseInt(params.page || "1");
   const filter = params.filter === "in_progress" ? "in_progress" : "";
   const effectiveStatus = params.status || filter;
-  // Default to active production records — stages whose order is currently in_production.
-  // Completed/cancelled orders drop off this list (their stages stay in DB for history,
-  // and a stage detail page is still reachable by id).
-  let queryStr = `/production?page=${page}&limit=20&active=true`;
+  let queryStr = `/production?page=${page}&limit=20&active=true&one_per_order=true`;
   if (effectiveStatus) queryStr += `&status=${effectiveStatus}`;
 
   const data = await serverGet<PaginatedResponse<ProductionStage>>(queryStr);
@@ -94,13 +92,17 @@ export default async function ProductionPage({
                       Order #{stage.order_id}
                     </Link>
                   </td>
-                  <td className="px-6 py-4 text-sm capitalize">{{"cutting": "Կտրում", "sewing": "Կարում", "quality_control": "Որակի վերահսկում", "packaging": "Փաթեթավորում", "ready_for_shipment": "Պատրաստ է առաքման"}[stage.stage_name] || stage.stage_name.replace(/_/g, " ")}</td>
+                  <td className="px-6 py-4 text-sm">{STAGE_LABELS[stage.stage_name] || stage.stage_name}</td>
                   <td className="px-6 py-4"><StatusBadge status={stage.status} /></td>
                   <td className="px-6 py-4 text-sm text-gray-600">{stage.started_at ? formatDate(stage.started_at) : "—"}</td>
                   <td className="px-6 py-4 text-sm text-gray-600">{stage.completed_at ? formatDate(stage.completed_at) : "—"}</td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex items-center justify-end gap-3 whitespace-nowrap">
-                      <StageStatusChange stageId={stage.id} currentStatus={stage.status} />
+                      <OrderCurrentControl
+                        orderId={stage.order_id}
+                        currentStage={stage.stage_name}
+                        currentStatus={stage.status}
+                      />
                       <Link href={`/dashboard/production/${stage.id}`} className="text-brand-700 hover:underline text-sm">
                         View
                       </Link>
@@ -155,7 +157,7 @@ export default async function ProductionPage({
                     )}
                   </td>
                   <td className="px-6 py-4 text-sm">
-                    {BATCH_STAGE_LABELS[b.current_stage] || b.current_stage}
+                    {STAGE_LABELS[b.current_stage] || b.current_stage}
                   </td>
                   <td className="px-6 py-4">
                     <StatusBadge status={b.stage_status} />

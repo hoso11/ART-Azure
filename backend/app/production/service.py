@@ -11,15 +11,9 @@ from app.production.models import (
 from app.exceptions import NotFoundException, ValidationException
 
 
-VALID_STAGE_TRANSITIONS = {
-    StageStatus.pending: [StageStatus.in_progress],
-    StageStatus.in_progress: [StageStatus.completed],
-    StageStatus.completed: [],
-    StageStatus.skipped: [],
-}
-
-
-DEFAULT_STAGES = [
+# Order-based stage workflow: five stages, sequential, both directions allowed
+# only between adjacent stages.
+DEFAULT_STAGES: list[StageName] = [
     StageName.cutting,
     StageName.sewing,
     StageName.quality_control,
@@ -27,42 +21,37 @@ DEFAULT_STAGES = [
     StageName.ready_for_shipment,
 ]
 
+VALID_STAGE_TRANSITIONS: dict[StageName, list[StageName]] = {
+    StageName.cutting: [StageName.sewing],
+    StageName.sewing: [StageName.cutting, StageName.quality_control],
+    StageName.quality_control: [StageName.sewing, StageName.packaging],
+    StageName.packaging: [StageName.quality_control, StageName.ready_for_shipment],
+    StageName.ready_for_shipment: [StageName.packaging],
+}
+
 
 async def create_stages_for_order(db: AsyncSession, order_id: int) -> list[ProductionStage]:
-    stages = []
-    for stage_name in DEFAULT_STAGES:
-        stage = ProductionStage(order_id=order_id, stage_name=stage_name)
-        db.add(stage)
-        stages.append(stage)
+    """Seed the five default ProductionStage rows for an order. Idempotent —
+    if any stages already exist for this order, returns the existing rows
+    unchanged.
+    """
+    existing_result = await db.execute(
+        select(ProductionStage).where(ProductionStage.order_id == order_id)
+    )
+    existing = existing_result.scalars().all()
+    if existing:
+        return list(existing)
+
+    stages = [
+        ProductionStage(order_id=order_id, stage_name=name, status=StageStatus.pending)
+        for name in DEFAULT_STAGES
+    ]
+    db.add_all(stages)
     await db.flush()
     for s in stages:
         await db.refresh(s)
+    logger.info("production.stages_created", order_id=order_id, count=len(stages))
     return stages
-
-
-async def ensure_initial_stage(db: AsyncSession, order_id: int) -> ProductionStage | None:
-    """Create a single initial production stage (cutting/pending) for an order
-    if and only if no production stage exists for that order yet.
-
-    Idempotent: safe to call repeatedly. Returns the new stage, or None if a
-    stage already existed.
-    """
-    existing = await db.execute(
-        select(ProductionStage.id).where(ProductionStage.order_id == order_id).limit(1)
-    )
-    if existing.scalar_one_or_none() is not None:
-        return None
-
-    stage = ProductionStage(
-        order_id=order_id,
-        stage_name=StageName.cutting,
-        status=StageStatus.pending,
-    )
-    db.add(stage)
-    await db.flush()
-    await db.refresh(stage)
-    logger.info("production.initial_stage_created", order_id=order_id, stage_id=stage.id)
-    return stage
 
 
 async def list_stages(
@@ -79,9 +68,6 @@ async def list_stages(
     count_query = select(func.count()).select_from(ProductionStage)
 
     if active_only:
-        # Active = the underlying order is currently in production.
-        # Completed/cancelled/shipped orders drop off the active production list
-        # automatically; their stages remain in DB for history.
         from app.orders.models import Order, OrderStatus
         query = query.join(Order, Order.id == ProductionStage.order_id).where(
             Order.status == OrderStatus.in_production
@@ -121,63 +107,71 @@ async def get_stage_by_id(db: AsyncSession, stage_id: int) -> ProductionStage:
     return stage
 
 
-async def update_stage(db: AsyncSession, stage_id: int, changed_by: int, **kwargs) -> ProductionStage:
+async def update_stage(
+    db: AsyncSession,
+    stage_id: int,
+    *,
+    new_stage_name: StageName,
+) -> ProductionStage:
+    """Move a stage forward/backward to an adjacent stage_name."""
     stage = await get_stage_by_id(db, stage_id)
-
-    if "status" in kwargs and kwargs["status"]:
-        new_status = kwargs["status"]
-        old_status = stage.status.value
-
-        log = ProductionLog(
-            production_stage_id=stage.id,
-            changed_by=changed_by,
-            previous_status=old_status,
-            new_status=new_status,
-            note=kwargs.get("notes"),
+    current = stage.stage_name
+    allowed = VALID_STAGE_TRANSITIONS.get(current, [])
+    if new_stage_name not in allowed:
+        raise ValidationException(
+            detail=(
+                f"Անթույլատրելի անցում՝ '{current.value}' -> '{new_stage_name.value}'. "
+                f"Թույլատրելի՝ {[s.value for s in allowed]}"
+            ),
+            code="invalid_stage_transition",
         )
-        db.add(log)
-
-        if new_status == StageStatus.in_progress.value and not stage.started_at:
-            stage.started_at = datetime.utcnow()
-        elif new_status == StageStatus.completed.value:
-            stage.completed_at = datetime.utcnow()
-
-        logger.info("production.stage_update", stage_id=stage_id, old=old_status, new=new_status)
-
-    for key, value in kwargs.items():
-        if value is not None:
-            setattr(stage, key, value)
-
+    stage.stage_name = new_stage_name
     await db.flush()
     await db.refresh(stage)
+    logger.info(
+        "production.stage_updated",
+        stage_id=stage_id, old=current.value, new=new_stage_name.value,
+    )
     return stage
 
 
 async def update_stage_status(
-    db: AsyncSession, stage_id: int, new_status: str, changed_by: int, note: str | None = None
+    db: AsyncSession,
+    stage_id: int,
+    *,
+    new_status: StageStatus,
+    changed_by: int,
+    note: str | None = None,
 ) -> ProductionStage:
-    """Change a production stage status with linear transition guard.
-    Allowed: pending -> in_progress -> completed. Same-status no-op is rejected
-    so callers don't double-create log rows by accident.
-    """
+    """Change stage status (pending → in_progress → completed). Writes a
+    ProductionLog row when the status actually changes."""
     stage = await get_stage_by_id(db, stage_id)
-    try:
-        target = StageStatus(new_status)
-    except ValueError:
-        raise ValidationException(detail=f"Unknown stage status: {new_status}", code="invalid_stage_status")
+    previous = stage.status
+    if previous == new_status:
+        return stage
 
-    if target == stage.status:
-        raise ValidationException(detail="Stage is already in this status", code="no_op_status")
+    log = ProductionLog(
+        production_stage_id=stage.id,
+        changed_by=changed_by,
+        previous_status=previous,
+        new_status=new_status,
+        note=note,
+    )
+    db.add(log)
 
-    allowed = VALID_STAGE_TRANSITIONS.get(stage.status, [])
-    if target not in allowed:
-        raise ValidationException(
-            detail=f"Cannot transition stage from {stage.status.value} to {target.value}",
-            code="invalid_stage_transition",
-        )
+    stage.status = new_status
+    if new_status == StageStatus.in_progress and not stage.started_at:
+        stage.started_at = datetime.utcnow()
+    if new_status == StageStatus.completed:
+        stage.completed_at = datetime.utcnow()
 
-    # Reuse the main update path so logging + started_at/completed_at stay in one place.
-    return await update_stage(db, stage_id, changed_by=changed_by, status=target.value, notes=note)
+    await db.flush()
+    await db.refresh(stage)
+    logger.info(
+        "production.stage_status_changed",
+        stage_id=stage_id, old=previous.value, new=new_status.value,
+    )
+    return stage
 
 
 async def get_production_summary(db: AsyncSession) -> dict:
@@ -186,6 +180,191 @@ async def get_production_summary(db: AsyncSession) -> dict:
         .group_by(ProductionStage.status)
     )
     return {row[0].value: row[1] for row in result.all()}
+
+
+# ── One-row-per-order aggregation (read + write) ─────────
+# These helpers serve the Production page's "one row per order" view.
+# They DO NOT change the underlying 5-rows-per-order schema — the existing
+# rows are read and selectively updated to maintain a single-in-progress
+# invariant. History is preserved.
+
+_STAGE_INDEX: dict[StageName, int] = {s: i for i, s in enumerate(DEFAULT_STAGES)}
+
+
+def compute_current(rows: list[ProductionStage]) -> ProductionStage | None:
+    """Pick the single row that represents the order's displayed current stage.
+
+    Rule (deterministic, total over any state of the 5 rows):
+      - The rightmost (latest in DEFAULT_STAGES order) row whose status is
+        NOT pending. If none, the leftmost row (cutting). If the order has
+        no rows, returns None.
+    """
+    if not rows:
+        return None
+    non_pending = [r for r in rows if r.status != StageStatus.pending]
+    if non_pending:
+        return max(non_pending, key=lambda r: _STAGE_INDEX.get(r.stage_name, -1))
+    return min(rows, key=lambda r: _STAGE_INDEX.get(r.stage_name, len(DEFAULT_STAGES)))
+
+
+async def get_stages_for_order(db: AsyncSession, order_id: int) -> list[ProductionStage]:
+    result = await db.execute(
+        select(ProductionStage).where(ProductionStage.order_id == order_id)
+    )
+    return list(result.scalars().all())
+
+
+async def list_one_per_order(
+    db: AsyncSession,
+    *,
+    page: int = 1,
+    limit: int = 20,
+    sort_order: str = "asc",
+    status: str | None = None,
+    active_only: bool = False,
+) -> tuple[list[ProductionStage], int]:
+    """Return one ProductionStage per order — the computed current row.
+
+    `status` filter is applied to the COMPUTED current status, not raw row
+    status (per UX requirement: filtering by 'in_progress' should match the
+    order's displayed current).
+    """
+    from app.orders.models import Order, OrderStatus
+
+    # Fetch distinct order_ids that match active/in_production filter.
+    base_query = select(ProductionStage.order_id).distinct()
+    if active_only:
+        base_query = base_query.join(Order, Order.id == ProductionStage.order_id).where(
+            Order.status == OrderStatus.in_production
+        )
+    base_query = base_query.order_by(
+        ProductionStage.order_id.asc() if sort_order == "asc"
+        else ProductionStage.order_id.desc()
+    )
+
+    all_order_ids_result = await db.execute(base_query)
+    all_order_ids = [row[0] for row in all_order_ids_result.all()]
+
+    if not all_order_ids:
+        return [], 0
+
+    # Load all stages for these orders, group, compute current.
+    stages_result = await db.execute(
+        select(ProductionStage).where(ProductionStage.order_id.in_(all_order_ids))
+    )
+    all_stages = list(stages_result.scalars().all())
+    by_order: dict[int, list[ProductionStage]] = {}
+    for s in all_stages:
+        by_order.setdefault(s.order_id, []).append(s)
+
+    currents: list[ProductionStage] = []
+    for oid in all_order_ids:
+        cur = compute_current(by_order.get(oid, []))
+        if cur is not None:
+            currents.append(cur)
+
+    if status:
+        currents = [c for c in currents if c.status.value == status]
+
+    total = len(currents)
+    start = (page - 1) * limit
+    return currents[start:start + limit], total
+
+
+async def set_order_current(
+    db: AsyncSession,
+    order_id: int,
+    *,
+    new_stage: str,
+    new_status: str,
+    changed_by: int,
+    note: str | None = None,
+) -> tuple[ProductionStage, StageName, StageStatus, StageName, StageStatus]:
+    """Set the displayed current (stage, status) for an order. Maintains the
+    invariant that at most one row has status=in_progress: rows for stages
+    BEFORE the chosen stage become completed; the chosen row gets the chosen
+    status; rows AFTER stay/become pending. No row is deleted; later rows'
+    started_at/completed_at history is preserved.
+
+    Returns: (chosen_row, old_stage, old_status, new_stage, new_status).
+    The router uses old/new pairs for audit and idempotence detection.
+    """
+    valid_stages = {s.value for s in StageName}
+    if new_stage not in valid_stages:
+        raise ValidationException(
+            detail=f"Անհայտ փուլ՝ '{new_stage}'. Թույլատրելի՝ {sorted(valid_stages)}",
+            code="invalid_stage",
+        )
+    valid_statuses = {s.value for s in StageStatus}
+    if new_status not in valid_statuses:
+        raise ValidationException(
+            detail=f"Անհայտ կարգավիճակ՝ '{new_status}'. Թույլատրելի՝ {sorted(valid_statuses)}",
+            code="invalid_stage_status",
+        )
+
+    new_stage_enum = StageName(new_stage)
+    new_status_enum = StageStatus(new_status)
+
+    rows = await get_stages_for_order(db, order_id)
+    if not rows:
+        raise NotFoundException(
+            detail=f"No production stages for order {order_id}",
+            code="production_not_found",
+        )
+
+    by_stage: dict[StageName, ProductionStage] = {r.stage_name: r for r in rows}
+
+    old_current = compute_current(rows)
+    old_stage_enum = old_current.stage_name
+    old_status_enum = old_current.status
+
+    chosen_row = by_stage.get(new_stage_enum)
+    if chosen_row is None:
+        raise NotFoundException(
+            detail=f"Stage row '{new_stage}' missing for order {order_id}",
+            code="stage_row_missing",
+        )
+
+    target_idx = _STAGE_INDEX[new_stage_enum]
+    now = datetime.utcnow()
+
+    for stage_name, row in by_stage.items():
+        idx = _STAGE_INDEX[stage_name]
+        if idx < target_idx:
+            row.status = StageStatus.completed
+            if row.completed_at is None:
+                row.completed_at = now
+        elif idx == target_idx:
+            row.status = new_status_enum
+            if new_status_enum == StageStatus.in_progress and row.started_at is None:
+                row.started_at = now
+            if new_status_enum == StageStatus.completed and row.completed_at is None:
+                row.completed_at = now
+        else:
+            row.status = StageStatus.pending
+            # leave started_at/completed_at as-is — preserve history per spec
+
+    # Idempotence: if the displayed current didn't change, don't write a log row.
+    changed = (old_stage_enum, old_status_enum) != (new_stage_enum, new_status_enum)
+    if changed:
+        log = ProductionLog(
+            production_stage_id=chosen_row.id,
+            changed_by=changed_by,
+            previous_status=old_status_enum,
+            new_status=new_status_enum,
+            note=note,
+        )
+        db.add(log)
+        logger.info(
+            "production.order_current_changed",
+            order_id=order_id,
+            old_stage=old_stage_enum.value, old_status=old_status_enum.value,
+            new_stage=new_stage_enum.value, new_status=new_status_enum.value,
+        )
+
+    await db.flush()
+    await db.refresh(chosen_row)
+    return chosen_row, old_stage_enum, old_status_enum, new_stage_enum, new_status_enum
 
 
 # ── Stock-based production batch service ─────────────────
@@ -238,10 +417,7 @@ async def create_production_batch(
     requirements = req_result.scalars().all()
     if not requirements:
         raise ValidationException(
-            detail=(
-                f"Նյութերի պահանջներ սահմանված չեն ապրանքի #{product_id} "
-                f"չափսի «{variant.size}» համար։ Սահմանեք պահանջները նախքան արտադրությունը։"
-            ),
+            detail="Տվյալ ապրանքը արտադրելու համար համապատասխան նյութեր սահմանված չեն։",
             code="no_material_requirements",
         )
 

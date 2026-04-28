@@ -194,26 +194,36 @@ def seed():
                 db.add(item)
         db.flush()
 
-        # ── Production Stages (for in_production orders) ──
+        # ── Production Stages (five default stages per in-production order) ──
         for order in orders:
             if order.status in (OrderStatus.in_production, OrderStatus.completed):
-                for stage_name in StageName:
+                default_stages = [
+                    StageName.cutting,
+                    StageName.sewing,
+                    StageName.quality_control,
+                    StageName.packaging,
+                    StageName.ready_for_shipment,
+                ]
+                for idx, stage_name in enumerate(default_stages):
                     if order.status == OrderStatus.completed:
                         status = StageStatus.completed
-                    elif stage_name == StageName.cutting:
-                        status = StageStatus.completed
-                    elif stage_name == StageName.sewing:
+                        started = now - timedelta(days=3)
+                        completed = now - timedelta(days=1)
+                    elif idx == 0:
                         status = StageStatus.in_progress
+                        started = now - timedelta(days=2)
+                        completed = None
                     else:
                         status = StageStatus.pending
-
+                        started = None
+                        completed = None
                     stage = ProductionStage(
                         order_id=order.id,
                         stage_name=stage_name,
                         status=status,
-                        assigned_to=admin.id if status != StageStatus.pending else None,
-                        started_at=now - timedelta(days=3) if status in (StageStatus.completed, StageStatus.in_progress) else None,
-                        completed_at=now - timedelta(days=1) if status == StageStatus.completed else None,
+                        assigned_to=admin.id,
+                        started_at=started,
+                        completed_at=completed,
                     )
                     db.add(stage)
         db.flush()

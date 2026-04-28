@@ -47,7 +47,7 @@ class ProductVariant(Base):
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     stock_quantity: Mapped[int] = mapped_column(Integer, default=0)
 
-    product = relationship("Product", back_populates="variants")
+    product = relationship("Product", back_populates="variants", lazy="selectin")
 
 
 class ProductImage(Base):

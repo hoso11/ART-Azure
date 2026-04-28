@@ -3,14 +3,7 @@ import { serverGet } from "@/lib/api.server";
 import { Product } from "@/types";
 import { formatCurrency } from "@/lib/utils";
 import Link from "next/link";
-
-function getProductPrimaryImage(product: Product): string | null {
-  const primary = product.images?.find((img) => img.is_primary);
-  if (primary?.url) return primary.url;
-  const first = product.images?.[0];
-  if (first?.url) return first.url;
-  return null;
-}
+import { ProductImageGallery } from "@/components/products/ProductImageGallery";
 
 export default async function CatalogProductPage({
   params,
@@ -25,26 +18,15 @@ export default async function CatalogProductPage({
     return <div className="text-center py-12"><h1 className="text-xl font-semibold">Product not found</h1></div>;
   }
 
-  const imageUrl = getProductPrimaryImage(product);
-
   return (
     <div className="max-w-5xl mx-auto px-6 py-8">
       <Link href="/catalog" className="text-sm text-brand-700 hover:underline">&larr; Վերադառնալ կատալոգ</Link>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-4">
-        <div className="bg-brand-50 rounded-lg flex items-center justify-center h-80 overflow-hidden">
-          {imageUrl ? (
-            <img
-              src={imageUrl}
-              alt={product.name}
-              className="w-full h-full object-cover"
-            />
-          ) : (
-            <svg className="h-24 w-24 text-brand-200" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
-            </svg>
-          )}
-        </div>
+        <ProductImageGallery
+          images={product.images || []}
+          productName={product.name}
+        />
 
         <div>
           <p className="text-sm text-brand-500 font-medium uppercase">{product.category?.name}</p>

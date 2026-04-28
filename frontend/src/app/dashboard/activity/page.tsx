@@ -41,6 +41,7 @@ const ACTION_LABELS: Record<string, string> = {
   "production.batch_completed": "Արտադրությունն ավարտվեց",
   "production.stage_updated": "Փուլը փոփոխվեց",
   "production.stage_status_changed": "Փուլի կարգավիճակը փոխվեց",
+  "production.order_current_changed": "Արտադրության փուլը փոխվեց",
   "report.generated": "Հաշվետվություն ստեղծվեց",
   "report.exported": "Հաշվետվություն արտահանվեց",
 };

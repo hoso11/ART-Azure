@@ -59,6 +59,19 @@ export interface Product {
   images: ProductImage[];
 }
 
+export interface OrderItemProductBrief {
+  id: number;
+  name: string;
+  sku: string;
+}
+
+export interface OrderItemVariantBrief {
+  id: number;
+  size: string;
+  color: string;
+  product: OrderItemProductBrief | null;
+}
+
 export interface OrderItem {
   id: number;
   order_id: number;
@@ -68,6 +81,7 @@ export interface OrderItem {
   notes: string | null;
   fulfilled_from_stock: number;
   production_quantity: number;
+  product_variant: OrderItemVariantBrief | null;
 }
 
 export interface OrderCustomer {
