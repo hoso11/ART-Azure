@@ -153,7 +153,17 @@ export default async function ProductionPage({
                   <td className="px-6 py-4 text-sm font-medium">
                     {b.quantity_to_produce}
                     {b.stock_added && (
-                      <span className="ml-2 text-xs text-green-700">✓ Պահեստավորված</span>
+                      <div className="mt-1 text-xs flex items-center gap-2">
+                        <span className="text-green-700">Լավ՝ {b.good_quantity}</span>
+                        {b.damaged_quantity > 0 && (
+                          <span
+                            className="bg-red-100 text-red-800 px-1.5 py-0.5 rounded font-medium"
+                            title={b.defect_reason || undefined}
+                          >
+                            Խոտան՝ {b.damaged_quantity}
+                          </span>
+                        )}
+                      </div>
                     )}
                   </td>
                   <td className="px-6 py-4 text-sm">
@@ -169,6 +179,7 @@ export default async function ProductionPage({
                       currentStage={b.current_stage}
                       currentStatus={b.stage_status}
                       stockAdded={b.stock_added}
+                      quantityToProduce={b.quantity_to_produce}
                     />
                   </td>
                 </tr>

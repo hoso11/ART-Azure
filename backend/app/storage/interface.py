@@ -3,9 +3,19 @@ from app.config import settings
 
 
 class StorageService(ABC):
+    # Subclasses set this to the bucket / container name they were
+    # configured with so callers (router proxy, Celery image task) don't
+    # need to know which backend is active.
+    bucket: str
+
     @abstractmethod
     async def upload_file(self, bucket: str, key: str, file: bytes, content_type: str) -> str:
         """Upload a file and return its storage key."""
+        ...
+
+    @abstractmethod
+    async def download_file(self, bucket: str, key: str) -> tuple[bytes, str]:
+        """Download a file. Returns (bytes, content_type)."""
         ...
 
     @abstractmethod

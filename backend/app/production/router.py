@@ -142,24 +142,42 @@ async def update_production_batch(
 )
 async def complete_production_batch(
     batch_id: int,
+    data: schemas.BatchCompleteRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    existing = await service.get_production_batch_by_id(db, batch_id)
-    already_done = existing.stock_added
-    batch = await service.complete_production_batch(db, batch_id)
-    if not already_done and batch.stock_added:
-        # Only audit the actual completion — idempotent re-calls are silent.
+    """Finalize a stock-based batch with a partial outcome.
+    Body: {good_quantity, damaged_quantity, defect_reason?}.
+    Sum must equal quantity_to_produce — implicit shrinkage is rejected.
+    Idempotent: second call is a silent no-op (no duplicate audit row).
+    """
+    batch, changed = await service.complete_production_batch(
+        db, batch_id,
+        good_quantity=data.good_quantity,
+        damaged_quantity=data.damaged_quantity,
+        defect_reason=data.defect_reason,
+    )
+    if changed:
+        details = (
+            f"Completed batch #{batch.id}: "
+            f"+{batch.good_quantity} good, +{batch.damaged_quantity} Խոտան "
+            f"to variant #{batch.variant_id}"
+        )
+        if batch.damaged_quantity > 0 and batch.defect_reason:
+            details += f" — {batch.defect_reason}"
         await activity_service.log_activity(
             db, user=admin, request=request,
-            action="production.batch_completed", entity_type="production_batch", entity_id=batch.id,
+            action="production.batch_completed",
+            entity_type="production_batch",
+            entity_id=batch.id,
             new_values={
-                "stock_added": True,
-                "quantity_added_to_variant": batch.quantity_to_produce,
+                "good_quantity": batch.good_quantity,
+                "damaged_quantity": batch.damaged_quantity,
                 "variant_id": batch.variant_id,
+                "stock_added": True,
             },
-            details=f"Completed batch #{batch.id}, +{batch.quantity_to_produce} to variant #{batch.variant_id}",
+            details=details,
         )
     return schemas.ProductionBatchResponse.model_validate(batch)
 

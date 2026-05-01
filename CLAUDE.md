@@ -2,6 +2,328 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Before starting any task — read the handoff folder
+
+The `handoff/` directory captures incident-driven rules that are not derivable from the code. Future agents must read at least the first two before proposing changes:
+
+- **`handoff/CURRENT_STATE.md`** — current branch, Alembic head, what's implemented, what's rolled back, last verified test/build status.
+- **`handoff/KNOWN_RISKS.md`** — failure modes that already cost a deployment (migration 009, poisoned `:v13` image, entrypoint whitelist semantics, Postgres enum + `varchar(32)` constraints, fragile single-in-progress invariant).
+- `handoff/SAFE_TASK_RULES.md` — hard rules for DB / frontend strings / verification / operational changes.
+- `handoff/NEXT_TASKS.md` — state of in-flight workstreams; what's done, what's open, what's explicitly off the roadmap.
+- `handoff/ROLLBACK_NOTES.md` — what was rolled back from v13, what must not be restored, detection commands for regression.
+
+**Hard rules:**
+
+- Do not implement a production stage rewrite or any `009_*` migration. Production currently uses the documented safe Option B (API aggregation in `backend/app/production/service.py` — `compute_current` / `list_one_per_order` / `set_order_current`); only extend that path, and only if explicitly approved per `handoff/SAFE_TASK_RULES.md` #1. Migration `009` was deleted after a destructive deploy; the next slot is `011_*`, never `009_*`.
+- Armenian UI strings must be valid Armenian Unicode only (`U+0531–U+058F`, currency `֏` U+058F). No Cyrillic / Greek / Latin lookalikes. After touching any frontend file with Armenian text, run the Cyrillic/Greek scan: `grep -rPn '[\x{0400}-\x{04FF}\x{0370}-\x{03FF}]' <files>` — zero matches required.
+- Production damaged-stock uses **per-unit quantities** on `ProductionBatch` — `good_quantity`, `damaged_quantity`, `defect_reason`. Never reintroduce a whole-batch `outcome ∈ {"good","defective"}` enum, and never resurrect a `/reject` endpoint. The "all damaged" case is `{good_quantity: 0, damaged_quantity: <quantity_to_produce>}` against the existing `/complete` endpoint with strict equality `good + damaged == quantity_to_produce`.
+- Damaged stock (`product_variants.damaged_stock_quantity`) must never be mixed into sellable-stock reads — catalog, order fulfillment, the `Մնացորդ` column, inventory totals, and any sellable-stock report all read `stock_quantity` only. Treating damaged units as available for sale would corrupt customer-visible inventory.
+- Order-based damaged production is **Phase 2 and off the roadmap** until a product decision is made (auto-reproduce vs. mark partially fulfilled vs. ship short — see `handoff/NEXT_TASKS.md` "Open" section). Do not modify `OrderItem` or production-stage code in pursuit of damaged tracking without explicit approval.
+- **All Azure resources must be deployed in `West Europe` (`westeurope`).** Single-region by design across `dev`, `int`, and `prod`. Set `var.location = "West Europe"` once per env in `terraform/envs/<env>/terraform.tfvars`; every downstream resource inherits `location` from its resource group, so do not introduce per-resource region overrides. Each environment also lives in a single resource group (`rg-art-<env>`) — do not split resources across multiple RGs without explicit approval.
+  - **Exception (PostgreSQL only):** PostgreSQL Flexible Server may use a different region (default **North Europe**) **only when West Europe is blocked by an Azure subscription restriction** (`LocationIsOfferRestricted` — common on trial / Visual Studio / Azure-for-Students / MOSP subscriptions). Set `var.postgres_location` per env. The resource group, both App Service Plans, both Web Apps, and all sidecars still stay in West Europe — only `azurerm_postgresql_flexible_server.this.location` may differ. North Europe is ~10 ms from West Europe and the free 12-month B1MS offer is available there. Cross-region egress between West Europe (Web App) and North Europe (Postgres) stays inside the 100 GB always-free outbound allowance for dev workloads, so the $0 target is preserved. When the West Europe restriction is lifted (quota request approved or subscription upgraded), set `postgres_location = "West Europe"` and re-apply — the server is recreated (data loss; `pg_dump` first if there is data to keep). No other workload may use this exception.
+
+## Critical Data Protection (load-bearing — read before any Terraform plan/apply)
+
+**PostgreSQL Flexible Server and Azure Blob Storage Account hold all application data — every order, customer, product, audit-log row, and uploaded image. Destroying or recreating either is irreversible without a backup.** They are protected by two independent layers, both of which must remain in place by default.
+
+### Layer 1 — Terraform `prevent_destroy = true` lifecycle blocks
+
+Set on all four data resources in `terraform/envs/dev/main.tf`:
+
+- `azurerm_postgresql_flexible_server.this`
+- `azurerm_postgresql_flexible_server_database.app`
+- `azurerm_storage_account.images`
+- `azurerm_storage_container.images`
+
+Effect: any plan that contains a destroy or replace (`-` or `-/+`) for these resources fails before apply with `Error: Instance cannot be destroyed`. Bypassing requires editing `main.tf` and removing the lifecycle line.
+
+### Layer 2 — Azure resource locks (`CanNotDelete`)
+
+Two locks declared in `main.tf`, scoped to the parent resource so child resources inherit:
+
+- `azurerm_management_lock.postgres_no_delete` → scope: PostgreSQL Flexible Server (covers the database too)
+- `azurerm_management_lock.storage_no_delete` → scope: Storage Account (covers the container and all blobs)
+
+Effect: any DELETE attempt against these resources via portal, `az` CLI, ARM API, or Terraform itself returns `403 Forbidden` until the lock is removed. `CanNotDelete` allows reads and updates, so image-tag bumps, app-setting changes, container creates, blob writes, and password rotations are unaffected. Resource locks are billed under Resource Manager and are **always free**.
+
+### Hard rules
+
+- **Do not destroy or replace** PostgreSQL (server or database) or Azure Storage (account or container) without an explicit user approval message that names the resource.
+- **Do not remove `prevent_destroy = true`** without explicit approval. The same approval should also remove the corresponding `azurerm_management_lock` if a real recreate is required.
+- **Do not change `lock_level` from `CanNotDelete` to `ReadOnly`** — `ReadOnly` blocks normal updates and would break image deployments.
+- **Before every `terraform apply`**, scan the plan output and report whether the protected resources are touched. The plan must show **none of**: `-/+ azurerm_postgresql_flexible_server.this`, `-/+ azurerm_postgresql_flexible_server_database.app`, `-/+ azurerm_storage_account.images`, `-/+ azurerm_storage_container.images`, `- destroy` for any of those, `-/+` or `- destroy` for the two `azurerm_management_lock` resources. Stop and surface any match.
+- **Schema or data migrations** that need a non-destructive rewrite use Alembic up/down migrations or `pg_dump`/`pg_restore`, never `terraform destroy` or a `-/+` replace.
+- **The documented "PostgreSQL → West Europe" recreate** when the `LocationIsOfferRestricted` block lifts is the only foreseen scenario in which `prevent_destroy` and the lock must be temporarily removed. The sequence is: `pg_dump` → comment out the lock → comment out `prevent_destroy` → apply → restore from dump → re-add `prevent_destroy` → re-add the lock → apply. Each step is its own user approval.
+
+### Storage Account — additional non-destroy guardrails
+
+These should also remain in place; changing them silently shifts the resource off the free tier:
+
+- `account_replication_type = "LRS"` (GRS/ZRS bill from byte one)
+- `account_kind = "StorageV2"` (premium tiers bill from byte one)
+- `access_tier = "Hot"` (Cool/Archive change retrieval cost behavior)
+- `allow_nested_items_to_be_public = false` (account-level safety net for the private container)
+
+The lifecycle precondition on the Postgres server (`var.postgres_sku_name == "B_Standard_B1ms"`) is the equivalent for the database side.
+
+## Terraform Authentication Rule (load-bearing — read before any Terraform command)
+
+- **Do not use Azure CLI for Terraform authentication in this project.** Do not run `az login`, `az account show`, `az logout`, or any other `az …` command unless I explicitly request it.
+- Terraform authenticates via a **Service Principal** whose credentials are loaded from local environment variables read out of:
+  - `terraform/envs/dev/.env.terraform`
+- That file contains the four `ARM_*` variables the `azurerm` provider expects: `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_SUBSCRIPTION_ID`, `ARM_TENANT_ID`.
+- Before running any Terraform command, source the env file in the current shell:
+  ```bash
+  cd terraform/envs/dev
+  source .env.terraform
+  ```
+  `source` only affects the current shell — re-source in a new terminal.
+- `.env.terraform` is **gitignored**. Never commit it. Never echo its contents into logs, transcripts, or commit messages. If you ever see it in `git status`, stop and add it to `.gitignore` before proceeding.
+- Do not replace the Service Principal flow with a personal Azure login (`az login`, `Connect-AzAccount`, OIDC) without explicit approval — those flows tie credentials to a human user instead of the project's SP and break unattended apply.
+- Do not ask me to install Azure CLI for Terraform. The project does not need it.
+- Run all Terraform commands from `terraform/envs/dev/`.
+
+### Standard Terraform workflow
+
+```bash
+cd terraform/envs/dev
+source .env.terraform
+terraform fmt -recursive
+terraform validate
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+After apply, verify outputs and live URLs:
+
+```bash
+terraform output | grep -E "deployed_image|backend_image|frontend_url|backend_url"
+curl -i "$(terraform output -raw backend_url)/api/v1/products/public?limit=8" | head -5
+```
+
+If Azure responds with `HTTP response was nil; connection may have been reset`, retry once with:
+
+```bash
+terraform apply -refresh=false
+```
+
+`terraform apply` requires explicit user approval each time per `handoff/SAFE_TASK_RULES.md` #14.
+
+## Azure Free-Tier Cost Guardrails
+
+Source of truth for what is free in Azure: **https://azure.microsoft.com/en-us/pricing/free-services#List-of-free-services**. Re-check this URL whenever you propose a new Azure resource — free-tier coverage changes and the official list is authoritative. Do not rely on memory.
+
+### 1. Billing target
+
+- The default target for this project is **$0 monthly Azure bill during the first 12 months**.
+- Prefer only Azure services listed on the official Azure free services page above.
+
+### 2. Allowed by default
+
+- Only use Azure services/SKUs that are **free**, **always-free**, or **free for 12 months** according to the official page.
+- Stay within the published free monthly limits.
+- Use the smallest/free SKU available.
+- App Service must use **F1 Free** unless I explicitly approve a paid SKU.
+- Do not upgrade App Service Plan to B1, S1, P1v3, or any paid tier without my explicit approval.
+
+### 3. Azure Free Resources Allowlist
+
+Rules:
+
+- Only resources in this allowlist may be proposed, created, or modified by default.
+- The SKU/tier and monthly free limit must match the allowlist exactly.
+- If a resource is **not** in this allowlist, it is **forbidden** unless I explicitly approve it.
+- If a resource is in the allowlist but the selected SKU/tier is not free, **stop and ask** me.
+- If monthly free limits can be exceeded by the proposed usage, **mention the limit before implementation**.
+- If unsure, **stop and ask** before modifying Terraform.
+
+#### Compute / Hosting
+
+- **App Service** — Free tier **F1** only — up to 10 web/API apps, 1 GB storage, 1 hour per day — *Always free*
+- **Azure Functions** — Consumption free allowance only — 1 million requests — *Always free*
+- **Static Web Apps** — Free plan only — 100 GB bandwidth per subscription, 2 custom domains, 0.5 GB storage per app — *Always free*
+- **Container Apps** — Free consumption allowance only — 180,000 vCPU seconds, 360,000 GiB seconds, 2 million requests — *Always free*
+- **Virtual Machines Linux** — only free 12-month eligible **B2pts v2 / B2ats v2** burstable VMs — 750 hours — *12 months*
+- **Virtual Machines Windows** — only free 12-month eligible **B2pts v2 / B2ats v2** burstable VMs — 750 hours — *12 months*
+
+#### Containers
+
+- **Azure Container Registry** — Standard tier only if included in 12-month free allowance — 1 Standard registry, 100 GB storage, 10 webhooks — *12 months*
+- **Azure Kubernetes Service** — cluster management is free, but node resources are paid, so AKS is **NOT allowed by default** unless node cost is explicitly approved.
+
+#### Databases
+
+- **Azure Database for PostgreSQL Flexible Server** — Burstable **B1MS** only — 750 hours, 32 GB storage, 32 GB backup storage — *12 months*
+- **Azure Database for MySQL Flexible Server** — Burstable **B1MS** only — 750 hours, 32 GB storage, 32 GB backup storage — *12 months*
+- **Azure Cosmos DB** — free allowance only — 1,000 RU/s and 25 GB storage always-free OR 400 RU/s and 25 GB 12-month offer, depending on account eligibility
+- **Azure Cosmos DB for MongoDB** — free tier / dedicated free cluster only — 32 GB storage — *Always free*
+- **SQL Database** — serverless free allowance only — up to 10 databases, 100,000 vCore seconds and 32 GB storage each — *Always free*
+
+#### Storage
+
+- **Blob Storage** — LRS hot block blob free allowance only — 5 GB, 20,000 reads, 10,000 writes — *12 months*
+- **Azure Files** — LRS free allowance only — 100 GB, 2 million operations — *12 months*
+- **Archive Storage** — free allowance only — 10 GB LRS storage, 10 GB write/retrieval, 100 reads — *12 months*
+- **Managed Disks** — only free allowance — 2 × 64 GB **P6 SSD**, 1 GB snapshot, 2 million I/O operations — *12 months*
+- **Cloud Shell storage** — 5 GB Azure Files storage — *12 months*
+
+#### Security / Identity
+
+- **Key Vault** — Standard tier only — 10,000 RSA 2048-bit key or secret operations — *12 months*
+- **Microsoft Entra ID** — free allowance only — 50,000 stored objects with SSO — *Always free*
+- **Azure AD B2C** — free allowance only — 50,000 monthly active users — *Always free*
+
+#### Networking
+
+- **Bandwidth outbound** — stay within free allowance — 100 GB outbound always-free and/or 15 GB outbound 12-month offer
+- **Virtual Network** — up to 50 VNets — *Always free*
+- **Private Link** — free service only, but **verify private endpoint / NIC / data processing charges before using**
+- **Load Balancer** — Standard Load Balancer free 12-month allowance only — 750 hours, 15 GB data processing, up to 5 rules — *12 months*
+- **VPN Gateway** — **VpnGw1** only if 12-month free allowance applies — 750 hours — *12 months*
+- **Network Watcher** — free allowance only — 5 GB storage, 1,000 checks, 10 tests, 10 connection metrics — *Always free*
+
+#### Monitoring / Management
+
+- **Cost Management** — Free — *Always free*
+- **Advisor** — Free — *Always free*
+- **Resource Manager** — Free — *Always free*
+- **Azure Policy** — free configuration and change-tracking features only — *Always free*
+- **Security Center / Defender for Cloud** — free policy assessment and recommendations only — *Always free*
+- **Monitor** — only free amounts per Azure Monitor pricing; **do not enable paid ingestion / retention** without approval
+- **Automation** — 500 minutes job runtime — *Always free*
+
+#### DevOps / Developer Tools
+
+- **Azure DevOps** — 5 users with unlimited private Git repos — *Always free*
+- **Visual Studio Code** — Free — *Always free*
+- **Cloud Shell** — allowed within free storage limit
+
+#### Integration / Messaging
+
+- **API Management** — Consumption tier only — 1 million monthly calls — *Always free*
+- **Event Grid** — 100,000 operations per month — *Always free*
+- **Logic Apps** — Consumption built-in actions only — 4,000 built-in actions — *Always free*
+- **Service Bus** — Standard tier free allowance only — 750 hours and 13 million operations — *12 months*
+- **App Configuration** — 1,000 requests per day, 10 MB storage — *Always free*
+- **Notification Hubs** — 1 million push notifications with free namespace — *Always free*
+- **Azure SignalR Service** — free allowance only — 20 concurrent connections per unit, 20,000 messages — *Always free*
+- **Web PubSub** — free allowance only — 20,000 messages per unit per day, 20 concurrent connections, 1 unit max — *Always free*
+
+#### AI / Cognitive Services
+
+Only use these if the app actually needs them and the free limits are respected.
+
+- **Azure AI Search** — 50 MB storage, 10,000 hosted documents, 3 indexes — *Always free*
+- **Azure Document Intelligence** — 500 pages S0 — *12 months*
+- **Azure Language** — 5,000 text records — *Always free*
+- **AI Bot Service** — 10,000 premium channel messages and unlimited standard messages — *Always free*
+- **AI Custom Vision** — 10,000 predictions S0, 1 training hour, 2 projects, 5,000 training images each — *12 months*
+- **AI Immersive Reader** — 3 million characters — *Always free*
+- **Speech to Text** — 5 audio hours per month — *Always free*
+- **Text to Speech** — 0.5 million characters per month — *Always free*
+- **Speech Translation** — 5 audio hours per month — *Always free*
+- **Translator** — 2 million characters per month — *Always free*
+- **Vision** — 5,000 transactions for S1/S2/S3 — *12 months*
+- **Face** — 30,000 Free instance transactions always-free or S0 12-month allowance
+- **Machine Learning** — free service only; **do not create paid compute**
+- **Open Datasets** — free, but egress charges may apply
+- **Content Safety** — only free allowance if applicable
+
+#### Other allowed free services
+
+- **Data Factory** — 5 low-frequency activities — *Always free*
+- **Data Catalog** — unlimited users — *Always free*
+- **Database Migration Service** — Free Standard Compute — *Always free*
+- **Azure Maps** — free transaction allowance only — *Always free*
+- **IoT Hub** — Free edition only — 8,000 messages per day, 0.5 KB message meter size — *Always free*
+- **IoT Edge** — free open-source runtime — *Always free*
+- **Azure Arc** — free control-plane functionality only — *Always free*
+- **Azure Migrate** — Free — *Always free*
+- **Azure Storage Mover** — Free — *Always free*
+- **Azure Resource Mover** — Free, but ingress/egress charges may apply
+- **Azure VM Image Builder** — free service only, but build resources / transfer may cost
+- **Batch** — free orchestration only; compute may cost
+- **DevTest Labs** — free service only; resources created inside may cost
+- **Azure Deployment Environments** — free service only; resources deployed through it may cost
+- **Azure Lighthouse** — Free
+- **Azure Managed Applications Service Catalog** — free publishing
+- **Azure Attestation** — Free
+- **Azure Update Manager** — free for Azure resources only; Arc-enabled servers may cost
+
+### 4. Forbidden by default
+
+**Resources not listed in the allowlist above are forbidden by default.**
+
+Also explicitly forbidden by default, even if they appear available in the portal:
+
+- App Service B1 / S1 / Premium
+- Application Gateway
+- Azure Front Door paid tiers
+- NAT Gateway
+- Azure Firewall
+- Paid Redis / Azure Managed Redis
+- Paid Log Analytics ingestion beyond free allowance
+- Paid private-endpoint-related charges unless confirmed free
+- **Any paid SKU**
+- **Any resource where pricing or free eligibility is uncertain**
+
+### 5. Terraform requirements
+
+Before adding any Azure Terraform resource:
+
+1. Identify the exact Azure service and SKU.
+2. State whether it is **free**, **12-month-free**, **always-free**, or **paid**.
+3. State the monthly free limit if applicable.
+4. Confirm whether it may create charges.
+5. If paid or uncertain, **stop and ask** before implementing.
+
+### 6. Cost Impact block on every Terraform change
+
+Every proposed Terraform change must include this block in plain text **before** any code:
+
+```
+Cost Impact:
+- Resource:
+- SKU:
+- Free category: Always free / 12 months / paid / uncertain
+- Monthly free limit:
+- Risk of charge:
+- Keeps $0 target: yes / no / uncertain
+```
+
+If `Free category` is `paid` or `uncertain` for any resource, **stop and ask for approval before writing code.**
+
+### 7. Safety behavior
+
+- If unsure whether something is free, **assume it may cost money and ask first**.
+- Never silently change a free SKU to a paid SKU. SKU upgrades must be called out in the proposed diff and approved before `terraform apply`.
+- Never recommend paid production architecture as the next step unless clearly separated as optional future work.
+- Keep Phase 1 / Phase 2 plans aligned with the $0 goal unless I explicitly approve paid services.
+
+## Building Docker images on Windows / Git Bash (load-bearing)
+
+The frontend production build (`frontend/Dockerfile.azure`) takes path-shaped build-args (`NEXT_PUBLIC_API_URL=/api/v1`) that are inlined into the JS bundle by webpack. **MSYS / Git Bash auto-converts arguments that start with `/` into Windows paths** before docker receives them — `/api/v1` becomes `C:/Program Files/Git/api/v1`. That string ends up in `clientFetch`'s base URL and every browser-side fetch throws `TypeError: Failed to fetch`. v22 and v23 frontend images shipped this bug; both are blacklisted in `terraform/envs/dev/variables.tf` validation.
+
+**Rules when building from Git Bash on Windows:**
+
+- Always set `MSYS_NO_PATHCONV=1` for the `docker build` invocation:
+  ```bash
+  MSYS_NO_PATHCONV=1 docker build -f frontend/Dockerfile.azure -t hoso30/art-frontend:vN \
+    --build-arg "INTERNAL_API_URL=https://app-art-backend-dev-art4242.azurewebsites.net" \
+    --build-arg "NEXT_PUBLIC_API_URL=/api/v1" \
+    --build-arg "NEXT_PUBLIC_APP_NAME=ART Manufacturing" \
+    ./frontend
+  ```
+- Or omit `--build-arg NEXT_PUBLIC_API_URL=/api/v1` entirely — `Dockerfile.azure` already defaults it to `"/api/v1"` (defaults written inside the Dockerfile aren't subject to MSYS conversion).
+- Or run from PowerShell / cmd, which don't path-mangle.
+- After every frontend image build, verify the bundle has the correct base URL before pushing:
+  ```bash
+  docker run --rm hoso30/art-frontend:vN sh -c \
+    'find /app/.next -name "*.js" -exec grep -l "C:/Program Files/Git" {} \; 2>/dev/null'
+  ```
+  Empty output is required. Any match means the build is poisoned — do not push, do not bump the Terraform tag.
+- Build with `--no-cache` if you suspect a poisoned base layer (relevant for any backend rebuild touching migrations, per `handoff/KNOWN_RISKS.md` #2).
+
 ## Common commands
 
 Everything runs inside Docker Compose; the `Makefile` is the canonical entry point.

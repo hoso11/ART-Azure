@@ -4,6 +4,23 @@
 !.env.example
 !.env.azure.example
 
+# Terraform — local credentials, state, and provider cache
+.env.terraform
+**/.env.terraform
+!.env.terraform.example
+!**/.env.terraform.example
+terraform.tfvars
+**/terraform.tfvars
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+# Saved plan files — they embed a full tfstate snapshot (including sensitive
+# values like random_password.postgres_admin.result). Never commit.
+tfplan
+*.tfplan
+
 # Python
 __pycache__/
 *.py[cod]
@@ -39,3 +56,9 @@ minio_data/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Runtime / build artifacts
+backend/celerybeat-schedule
+backend/celerybeat-schedule.bak
+backend/test.db
+frontend/tsconfig.tsbuildinfo

@@ -14,7 +14,8 @@ type ReportType =
   | "material-consumption"
   | "production"
   | "low-stock"
-  | "customer-discounts";
+  | "customer-discounts"
+  | "damaged-stock";
 
 type DatePreset = "today" | "7d" | "30d" | "90d" | "custom";
 
@@ -34,6 +35,7 @@ const REPORT_TYPES: { value: ReportType; label: string }[] = [
   { value: "production", label: "Արտադրության հաշվետվություն" },
   { value: "low-stock", label: "Ցածր մնացորդով նյութեր" },
   { value: "customer-discounts", label: "Հաճախորդների զեղչերի հաշվետվություն" },
+  { value: "damaged-stock", label: "Խոտանի հաշվետվություն" },
 ];
 
 const DATE_PRESETS: { value: DatePreset; label: string }[] = [
@@ -98,6 +100,13 @@ const COLUMNS: Record<ReportType, Col[]> = {
     { key: "discount_percent", label: "Discount %", format: "number" },
     { key: "total_orders", label: "Orders", format: "number" },
     { key: "total_revenue", label: "Revenue", format: "currency" },
+  ],
+  "damaged-stock": [
+    { key: "product_name", label: "Ապրանք" },
+    { key: "sku", label: "SKU" },
+    { key: "size", label: "Չափս" },
+    { key: "color", label: "Գույն" },
+    { key: "damaged_stock_quantity", label: "Խոտանի քանակ", format: "number" },
   ],
 };
 
@@ -247,6 +256,74 @@ function SalesPreview({ data }: { data: SalesData }) {
 
       {by_day.length === 0 && by_customer.length === 0 && (
         <EmptyState />
+      )}
+    </div>
+  );
+}
+
+interface DamagedStockData {
+  summary: {
+    total_damaged: number;
+    products_affected: number;
+    variants_affected: number;
+  };
+  items: {
+    product_id: number;
+    product_name: string;
+    sku: string;
+    variant_id: number;
+    size: string;
+    color: string;
+    damaged_stock_quantity: number;
+  }[];
+}
+
+function DamagedStockPreview({ data }: { data: DamagedStockData }) {
+  const { summary, items } = data;
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        <div className="bg-red-50 border border-red-100 rounded-lg p-4">
+          <p className="text-xs text-gray-600">Ընդհանուր խոտան</p>
+          <p className="text-xl font-bold mt-1 text-red-700">{summary.total_damaged}</p>
+        </div>
+        <div className="bg-gray-50 rounded-lg p-4">
+          <p className="text-xs text-gray-500">Ապրանքների քանակ</p>
+          <p className="text-xl font-bold mt-1 text-gray-800">{summary.products_affected}</p>
+        </div>
+        <div className="bg-gray-50 rounded-lg p-4">
+          <p className="text-xs text-gray-500">Տարբերակների քանակ</p>
+          <p className="text-xl font-bold mt-1 text-gray-800">{summary.variants_affected}</p>
+        </div>
+      </div>
+
+      {items.length === 0 ? (
+        <EmptyState />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-200">
+                <th className="text-left py-2 pr-4 text-xs font-medium text-gray-500">Ապրանք</th>
+                <th className="text-left py-2 pr-4 text-xs font-medium text-gray-500">SKU</th>
+                <th className="text-left py-2 pr-4 text-xs font-medium text-gray-500">Չափս</th>
+                <th className="text-left py-2 pr-4 text-xs font-medium text-gray-500">Գույն</th>
+                <th className="text-left py-2 text-xs font-medium text-gray-500">Խոտանի քանակ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((row) => (
+                <tr key={row.variant_id} className="border-b border-gray-100 hover:bg-gray-50">
+                  <td className="py-2 pr-4 font-medium">{row.product_name}</td>
+                  <td className="py-2 pr-4 text-gray-500 font-mono text-xs">{row.sku}</td>
+                  <td className="py-2 pr-4">{row.size}</td>
+                  <td className="py-2 pr-4">{row.color}</td>
+                  <td className="py-2 text-red-700 font-semibold">{row.damaged_stock_quantity}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -518,6 +595,12 @@ export function ReportBuilder({
             {reportType === "sales" ? (
               reportData ? (
                 <SalesPreview data={reportData as SalesData} />
+              ) : (
+                <EmptyState />
+              )
+            ) : reportType === "damaged-stock" ? (
+              reportData ? (
+                <DamagedStockPreview data={reportData as DamagedStockData} />
               ) : (
                 <EmptyState />
               )

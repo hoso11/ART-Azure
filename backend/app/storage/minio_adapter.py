@@ -14,7 +14,8 @@ class MinIOStorageService(StorageService):
             secret_key=settings.minio_secret_key,
             secure=settings.minio_use_ssl,
         )
-        self._ensure_bucket(settings.minio_bucket)
+        self.bucket = settings.minio_bucket
+        self._ensure_bucket(self.bucket)
 
     def _ensure_bucket(self, bucket: str):
         if not self.client.bucket_exists(bucket):
@@ -51,6 +52,16 @@ class MinIOStorageService(StorageService):
         )
         logger.info("storage.upload", bucket=bucket, key=key, size=len(file))
         return key
+
+    async def download_file(self, bucket: str, key: str) -> tuple[bytes, str]:
+        resp = self.client.get_object(bucket, key)
+        try:
+            data = resp.read()
+            content_type = resp.headers.get("Content-Type", "application/octet-stream")
+        finally:
+            resp.close()
+            resp.release_conn()
+        return data, content_type
 
     async def get_file_url(self, bucket: str, key: str) -> str:
         protocol = "https" if settings.minio_use_ssl else "http"

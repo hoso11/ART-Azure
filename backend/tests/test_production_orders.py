@@ -368,7 +368,11 @@ async def test_stock_based_batch_flow_unaffected(
     })
     assert create.status_code == 201
     bid = create.json()["id"]
-    r = await client.patch(f"/api/v1/production/batches/{bid}/complete", cookies=admin_cookies)
+    r = await client.patch(
+        f"/api/v1/production/batches/{bid}/complete",
+        json={"good_quantity": 3, "damaged_quantity": 0},
+        cookies=admin_cookies,
+    )
     assert r.status_code == 200
     batch_count = (await db_session.execute(
         select(func.count()).select_from(ProductionBatch)

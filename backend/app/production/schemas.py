@@ -78,6 +78,18 @@ class ProductionBatchUpdate(BaseModel):
     stage_status: Optional[str] = None
 
 
+class BatchCompleteRequest(BaseModel):
+    """Finalize a stock-based batch with a partial outcome.
+    Service enforces:
+      - good_quantity >= 0
+      - damaged_quantity >= 0
+      - good_quantity + damaged_quantity == quantity_to_produce
+    """
+    good_quantity: int
+    damaged_quantity: int
+    defect_reason: Optional[str] = None
+
+
 class ProductionBatchProduct(BaseModel):
     id: int
     name: str
@@ -104,6 +116,9 @@ class ProductionBatchResponse(BaseModel):
     stage_status: str
     materials_deducted: bool
     stock_added: bool
+    good_quantity: int = 0
+    damaged_quantity: int = 0
+    defect_reason: Optional[str] = None
     created_by: int
     created_at: datetime
     completed_at: Optional[datetime] = None

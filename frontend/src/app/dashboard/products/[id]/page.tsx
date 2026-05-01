@@ -62,11 +62,12 @@ export default async function ProductDetailPage({
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Գույն</th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Գին</th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Մնացորդ</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Խոտան</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200">
                       {product.variants.length === 0 && (
-                        <tr><td colSpan={4} className="px-6 py-8 text-center text-gray-500 text-sm">Տարբերակներ չկան</td></tr>
+                        <tr><td colSpan={5} className="px-6 py-8 text-center text-gray-500 text-sm">Տարբերակներ չկան</td></tr>
                       )}
                       {product.variants.map((v) => (
                         <tr key={v.id}>
@@ -74,6 +75,7 @@ export default async function ProductDetailPage({
                           <td className="px-6 py-4 text-sm">{v.color}</td>
                           <td className="px-6 py-4 text-sm">{formatCurrency(v.price)}</td>
                           <td className="px-6 py-4 text-sm">{v.stock_quantity}</td>
+                          <td className={`px-6 py-4 text-sm ${v.damaged_stock_quantity > 0 ? "text-red-700 font-medium" : "text-gray-400"}`}>{v.damaged_stock_quantity}</td>
                         </tr>
                       ))}
                     </tbody>

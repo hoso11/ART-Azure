@@ -33,6 +33,9 @@ export function CreateBatchModal({
 }) {
   const router = useRouter();
   const [products, setProducts] = useState<Product[]>([]);
+  const [productsLoading, setProductsLoading] = useState(false);
+  const [productsError, setProductsError] = useState<string | null>(null);
+  const [productsLoadId, setProductsLoadId] = useState(0);
   const [productId, setProductId] = useState<string>("");
   const [variantId, setVariantId] = useState<string>("");
   const [quantity, setQuantity] = useState<string>("1");
@@ -42,20 +45,45 @@ export function CreateBatchModal({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    (async () => {
+
+    async function loadProducts() {
+      setProductsLoading(true);
+      setProductsError(null);
       try {
-        const res = await clientFetch("/products?limit=100");
-        if (!res.ok) return;
+        let res = await clientFetch("/products?limit=100");
+        if (res.status === 401) {
+          // Access token may have expired since the page rendered. Try a
+          // single silent refresh — the refresh_token cookie is scoped to
+          // /api/v1/auth/refresh and is httpOnly, so the browser handles it.
+          const refresh = await clientFetch("/auth/refresh", { method: "POST" });
+          if (refresh.ok) {
+            res = await clientFetch("/products?limit=100");
+          }
+        }
+        if (cancelled) return;
+        if (!res.ok) {
+          if (res.status === 401) {
+            setProductsError("Մուտքագրումն ավարտվել է — թարմացրեք էջը");
+          } else {
+            setProductsError(`Չհաջողվեց բեռնել ապրանքները (${res.status})`);
+          }
+          return;
+        }
         const data = await res.json();
-        if (!cancelled) setProducts(data.items || []);
+        const items: Product[] = Array.isArray(data?.items) ? data.items : [];
+        if (!cancelled) setProducts(items);
       } catch {
-        // ignore — empty product list will surface its own validation
+        if (!cancelled) setProductsError("Կապի սխալ — փորձեք կրկին");
+      } finally {
+        if (!cancelled) setProductsLoading(false);
       }
-    })();
+    }
+
+    loadProducts();
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, [open, productsLoadId]);
 
   useEffect(() => {
     if (!open) {
@@ -121,14 +149,35 @@ export function CreateBatchModal({
               setVariantId("");
             }}
             required
+            disabled={productsLoading || !!productsError}
           >
-            <option value="">— Ընտրեք —</option>
+            <option value="">
+              {productsLoading
+                ? "Բեռնվում է…"
+                : productsError
+                  ? "Չհաջողվեց բեռնել"
+                  : products.length === 0
+                    ? "Ապրանքներ չեն գտնվել"
+                    : "— Ընտրեք —"}
+            </option>
             {products.map((p) => (
               <option key={p.id} value={String(p.id)}>
                 {p.name} ({p.sku})
               </option>
             ))}
           </Select>
+          {productsError && (
+            <div className="mt-1 flex items-center gap-2 text-sm">
+              <span className="text-red-600">{productsError}</span>
+              <button
+                type="button"
+                className="text-brand-700 hover:underline"
+                onClick={() => setProductsLoadId((n) => n + 1)}
+              >
+                Կրկին փորձել
+              </button>
+            </div>
+          )}
         </FormField>
 
         <FormField label="Տարբերակ / Չափս / Գույն" required>

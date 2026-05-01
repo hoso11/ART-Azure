@@ -33,6 +33,7 @@ export interface ProductVariant {
   color: string;
   price: number;
   stock_quantity: number;
+  damaged_stock_quantity: number;
   discounted_price?: number | null;
 }
 
@@ -163,6 +164,9 @@ export interface ProductionBatch {
   stage_status: string;
   materials_deducted: boolean;
   stock_added: boolean;
+  good_quantity: number;
+  damaged_quantity: number;
+  defect_reason: string | null;
   created_by: number;
   created_at: string;
   completed_at: string | null;

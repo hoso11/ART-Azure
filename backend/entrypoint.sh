@@ -18,6 +18,7 @@ try:
         None, "001_initial", "002_var_mat_req", "003_user_discount",
         "004_order_materials_deducted", "006_order_item_fulfillment",
         "007_production_batches", "008_activity_log_columns",
+        "010_batch_partial_outcome",
     }
     with engine.begin() as conn:
         row = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).first()

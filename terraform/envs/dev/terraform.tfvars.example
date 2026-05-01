@@ -1,0 +1,146 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# subscription_id / tenant_id are usually NOT set here when you use the
+# .env.terraform workflow (the provider reads ARM_* env vars after
+# `source .env.terraform`).
+#
+# All resource names are computed by ../../modules/naming from
+# project + environment + suffix. Do not set names directly.
+
+# --- Azure (optional when .env.terraform is sourced) -----------------------
+subscription_id = "00000000-0000-0000-0000-000000000000"
+tenant_id       = "00000000-0000-0000-0000-000000000000"
+
+# --- Region (locked to West Europe per CLAUDE.md hard rule) ----------------
+location = "West Europe"
+
+# --- Naming inputs ---------------------------------------------------------
+# rg-art-dev
+# asp-art-dev          (frontend plan)
+# asp-art-backend-dev  (backend plan — Phase 2)
+# app-art-frontend-dev-<suffix>
+# app-art-backend-dev-<suffix>
+project     = "art"
+environment = "dev"
+suffix      = "REPLACE_ME" # 4–8 lowercase letters/digits, no dashes
+
+# --- Frontend image --------------------------------------------------------
+# v22 rebuilds the product image gallery from frontend/Dockerfile.azure
+# (the production multi-stage Dockerfile that runs `next build` and ships
+# the .next/standalone runtime). v21 was poisoned — built from the dev
+# Dockerfile (`npm run dev`), which crashed in Azure with
+# "Module parse failed: Unexpected character '@'" on Tailwind globals.css
+# because PostCSS devDependencies could not load under NODE_ENV=production.
+# Never use v21 or v13.
+# v20 baseline: INTERNAL_API_URL is baked at the absolute backend Web App
+# URL (https://app-art-backend-dev-<suffix>.azurewebsites.net) so
+# Next.js /api/* rewrites reach the backend in Azure. NEXT_PUBLIC_API_URL
+# stays '/api/v1' (relative) so the browser keeps issuing same-origin
+# fetches, which preserves SameSite=Lax auth cookies.
+frontend_image     = "hoso30/art-frontend"
+frontend_image_tag = "v24"
+container_port     = 3000
+
+# --- Backend image ---------------------------------------------------------
+# v21 makes the products image proxy backend-agnostic — it now streams via
+# storage.download_file() so MinIO and Azure Blob both work. v20 was
+# MinIO-only and 404'd in Azure for image GETs.
+# v20 baseline: Azure Blob Storage adapter (azure-storage-blob SDK,
+# app/storage/azure_adapter.py implemented, products proxy + worker task
+# routed through the StorageService abstraction). Required for
+# STORAGE_BACKEND=azure (the default in Azure deploys).
+# NOTE: do NOT use v13 — that image contains the failed migration 009
+# (handoff/KNOWN_RISKS.md #2).
+backend_image     = "hoso30/art-backend"
+backend_image_tag = "v21"
+backend_port      = 8000
+
+# --- Backend lifecycle -----------------------------------------------------
+# Phase 3 default: TRUE. Postgres is provisioned in the same apply, so
+# DATABASE_URL_SYNC points at a real DB and alembic completes cleanly.
+# Set to `false` to stop the backend without destroying it (zero CPU, $0).
+#
+# backend_enabled = true
+
+# --- Sidecars (Phase 2) ----------------------------------------------------
+worker_sidecar_enabled = true
+redis_sidecar_enabled  = true
+# MinIO sidecar disabled in Azure — Azure Blob Storage replaces it
+# (Phase 4). Local docker-compose still uses MinIO; this only affects
+# the Azure deploy.
+minio_sidecar_enabled = false
+
+redis_image     = "redis"
+redis_image_tag = "7-alpine"
+redis_port      = 6379
+
+# Worker startup command — single command, NO bash -c wrapper. The --beat
+# flag runs Celery Beat inside the worker process (single-instance dev only).
+worker_startup_command = "celery -A app.worker.celery_app worker --beat --loglevel=info"
+worker_target_port     = 9999
+
+# MinIO — S3-compatible object store for product images. Required while
+# backend_storage_backend = "minio" (the default) because MinIOStorageService
+# eagerly calls bucket_exists() on first request. Sidecar runs on the existing
+# backend F1 plan; no new SKU. Replace minio_access_key / minio_secret_key
+# before any real use — the defaults match the MinIO image's defaults but are
+# weak. Persistence is ephemeral (acceptable for dev).
+minio_image        = "minio/minio"
+minio_image_tag    = "latest"
+# IMPORTANT: NOT 9000. Azure App Service Linux's platform PHP-FPM binds 9000
+# inside every Web App's network namespace; if MinIO also binds 9000 the
+# multi-container app cycles in a SIGTERM loop. 9100/9101 stay above the
+# platform-reserved zone.
+minio_port         = 9100
+minio_console_port = 9101
+minio_bucket       = "art-images"
+# minio_access_key = "minioadmin"   # default; replace before real use
+# minio_secret_key = "minioadmin"   # default; replace before real use
+
+# --- Backend app settings --------------------------------------------------
+# JWT signing key — replace before any real auth use.
+backend_secret_key      = "placeholder-dev-secret-change-me"
+# Storage backend in Azure: 'azure' (default) uses managed Blob Storage;
+# 'minio' would require enabling the sidecar above.
+backend_storage_backend = "azure"
+
+# Azure Blob container for product images. Auto-created by the backend on
+# first request; the Storage Account itself is provisioned by Terraform.
+azure_storage_container = "art-images"
+
+# --- Phase 3: PostgreSQL Flexible Server (12-month free tier) --------------
+# All Postgres variables have defaults that match the free-tier-eligible
+# B1MS Burstable / 32 GB / 7-day-backup configuration. Override here ONLY
+# if you have a specific reason — and note that variables.tf has validation
+# rules that will reject anything off the free-tier path.
+#
+# DATABASE_URL / DATABASE_URL_SYNC are NOT variables — they are computed in
+# main.tf from the real Postgres FQDN + the auto-generated admin password.
+# If your existing terraform.tfvars still has lines like
+#   backend_database_url      = "..."
+#   backend_database_url_sync = "..."
+# delete them — they will produce "undeclared variable" warnings.
+#
+# The admin password is auto-generated by random_password.postgres_admin
+# (24 chars, URL-safe special chars only) and stored in Terraform state.
+# Read it with: terraform output -raw postgres_admin_password
+#
+# postgres_version               = "16"
+# postgres_sku_name              = "B_Standard_B1ms"   # only B1MS is allowed (free)
+# postgres_storage_mb            = 32768               # 32 GB max for free
+# postgres_backup_retention_days = 7                   # 7-day min retention
+# postgres_admin_user            = "art_admin"
+# postgres_database_name         = "art_manufacturing"
+
+# Region exception for PostgreSQL only (CLAUDE.md hard-rule exception):
+# All other resources stay in West Europe. The Postgres server defaults to
+# North Europe because Azure blocked Flexible Server provisioning in West
+# Europe with LocationIsOfferRestricted (trial / Visual Studio / Students /
+# MOSP subscriptions are commonly affected). Free-tier B1MS offer applies
+# in North Europe. Cross-region egress is inside the 100 GB always-free
+# allowance for dev workloads. Set back to "West Europe" once the West
+# Europe restriction is lifted (quota approved or subscription upgraded).
+# postgres_location              = "North Europe"

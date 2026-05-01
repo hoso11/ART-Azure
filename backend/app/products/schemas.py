@@ -56,6 +56,7 @@ class VariantResponse(BaseModel):
     color: str
     price: Decimal
     stock_quantity: int
+    damaged_stock_quantity: int = 0
     discounted_price: Optional[Decimal] = None
 
     model_config = {"from_attributes": True}

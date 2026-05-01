@@ -194,3 +194,17 @@ async def get_customer_discount_report(
     if format == "csv":
         return _csv_response(service.customer_discount_to_csv(data), "customer_discount_report.csv")
     return data
+
+
+@router.get("/damaged-stock")
+async def get_damaged_stock_report(
+    request: Request,
+    format: str = Query("json"),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    data = await service.get_damaged_stock_report(db)
+    await _audit_report(db, admin, request, "damaged_stock", format)
+    if format == "csv":
+        return _csv_response(service.damaged_stock_to_csv(data), "damaged_stock_report.csv")
+    return data

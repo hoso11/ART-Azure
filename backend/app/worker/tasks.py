@@ -18,17 +18,18 @@ def get_sync_session():
 
 @celery_app.task(name="app.worker.tasks.process_image")
 def process_image(bucket: str, key: str):
-    """Resize and optimize an uploaded product image."""
-    from app.storage.minio_adapter import MinIOStorageService
+    """Resize and optimize an uploaded product image. Backend-agnostic:
+    routes through the StorageService abstraction so it works against MinIO
+    (local dev) or Azure Blob (Azure deploy) without conditional code."""
+    from app.storage.interface import get_storage_service
 
     logger.info("task.process_image.start", key=key)
-    storage = MinIOStorageService()
+    storage = get_storage_service()
 
     try:
-        response = storage.client.get_object(bucket, key)
-        image_data = response.read()
-        response.close()
-        response.release_conn()
+        # Storage interface is async; Celery tasks are sync. asyncio.run
+        # spins a fresh loop per call — fine for an occasional image task.
+        image_data, _ = asyncio.run(storage.download_file(bucket, key))
 
         img = Image.open(io.BytesIO(image_data))
 
@@ -47,9 +48,7 @@ def process_image(bucket: str, key: str):
         optimized = output.getvalue()
 
         # Re-upload
-        storage.client.put_object(
-            bucket, key, io.BytesIO(optimized), len(optimized), content_type="image/jpeg"
-        )
+        asyncio.run(storage.upload_file(bucket, key, optimized, "image/jpeg"))
         logger.info("task.process_image.done", key=key, original_size=len(image_data), new_size=len(optimized))
     except Exception as e:
         logger.error("task.process_image.failed", key=key, error=str(e))

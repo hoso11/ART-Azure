@@ -23,6 +23,9 @@ redis==5.2.1
 
 # Storage
 minio==7.2.12
+# Azure Blob Storage SDK — used when STORAGE_BACKEND=azure (Azure deploy).
+# MinIO stays for local docker-compose dev.
+azure-storage-blob==12.23.1
 
 # Email
 aiosmtplib==3.0.2

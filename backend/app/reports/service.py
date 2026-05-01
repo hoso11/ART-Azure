@@ -501,3 +501,58 @@ def customer_discount_to_csv(data: list[dict]) -> str:
         for r in data
     ]
     return _to_csv(headers, rows)
+
+
+# ── Damaged Stock (Խոտան) Report ─────────────────────────
+# Reads ONLY ProductVariant.damaged_stock_quantity. Does not touch sellable
+# stock or production logic. Lists variants with damaged > 0; aggregates totals.
+
+async def get_damaged_stock_report(db: AsyncSession) -> dict:
+    from app.products.models import Product, ProductVariant
+
+    result = await db.execute(
+        select(ProductVariant, Product)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(ProductVariant.damaged_stock_quantity > 0)
+        .order_by(Product.name, ProductVariant.size, ProductVariant.color)
+    )
+
+    items: list[dict] = []
+    affected_products: set[int] = set()
+    total_damaged = 0
+    for variant, product in result.all():
+        items.append({
+            "product_id": product.id,
+            "product_name": product.name,
+            "sku": product.sku,
+            "variant_id": variant.id,
+            "size": variant.size,
+            "color": variant.color,
+            "damaged_stock_quantity": variant.damaged_stock_quantity,
+        })
+        affected_products.add(product.id)
+        total_damaged += variant.damaged_stock_quantity
+
+    return {
+        "summary": {
+            "total_damaged": total_damaged,
+            "products_affected": len(affected_products),
+            "variants_affected": len(items),
+        },
+        "items": items,
+    }
+
+
+def damaged_stock_to_csv(data: dict) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    s = data["summary"]
+    writer.writerow(["Damaged Stock Report Summary"])
+    writer.writerow(["Total Damaged", s["total_damaged"]])
+    writer.writerow(["Products Affected", s["products_affected"]])
+    writer.writerow(["Variants Affected", s["variants_affected"]])
+    writer.writerow([])
+    writer.writerow(["Product", "SKU", "Size", "Color", "Damaged Quantity"])
+    for r in data["items"]:
+        writer.writerow([r["product_name"], r["sku"], r["size"], r["color"], r["damaged_stock_quantity"]])
+    return output.getvalue()

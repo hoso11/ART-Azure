@@ -582,12 +582,38 @@ async def update_production_batch(
     return batch
 
 
-async def complete_production_batch(db: AsyncSession, batch_id: int) -> ProductionBatch:
-    """Mark a batch completed and add `quantity_to_produce` to variant stock.
-    Idempotent: if `stock_added` is already True, the second call returns the
-    batch unchanged and never re-increments stock.
+async def complete_production_batch(
+    db: AsyncSession,
+    batch_id: int,
+    *,
+    good_quantity: int,
+    damaged_quantity: int,
+    defect_reason: str | None = None,
+) -> tuple[ProductionBatch, bool]:
+    """Finalize a stock-based batch with a partial outcome.
+
+    - good_quantity goes to variant.stock_quantity (sellable).
+    - damaged_quantity goes to variant.damaged_stock_quantity (Խոտան).
+    - Materials stay deducted in all cases.
+    - Idempotent: second call returns the batch unchanged. The bool flag tells
+      the router whether this was the real completion (True) or a no-op
+      (False), so audit logs aren't duplicated.
+    - Validates good >= 0, damaged >= 0, good + damaged == quantity_to_produce.
+      Implicit shrinkage is NOT allowed (admin must enter exact split).
     """
     from app.products.models import ProductVariant
+
+    # Validate quantities BEFORE locking anything.
+    if good_quantity < 0:
+        raise ValidationException(
+            detail="Լավ քանակը չի կարող բացասական լինել",
+            code="invalid_quantities",
+        )
+    if damaged_quantity < 0:
+        raise ValidationException(
+            detail="Խոտանի քանակը չի կարող բացասական լինել",
+            code="invalid_quantities",
+        )
 
     # Lock the batch row.
     batch_result = await db.execute(
@@ -599,9 +625,18 @@ async def complete_production_batch(db: AsyncSession, batch_id: int) -> Producti
 
     if batch.stock_added:
         # Already completed — return unchanged. Idempotent by design.
-        return batch
+        return batch, False
 
-    # Lock the variant row and add the produced quantity to its stock.
+    if good_quantity + damaged_quantity != batch.quantity_to_produce:
+        raise ValidationException(
+            detail=(
+                f"Լավ + Խոտան = {good_quantity + damaged_quantity}, "
+                f"բայց արտադրության քանակը {batch.quantity_to_produce} է"
+            ),
+            code="invalid_quantities",
+        )
+
+    # Lock the variant row and add both counters atomically.
     variant_result = await db.execute(
         select(ProductVariant).where(ProductVariant.id == batch.variant_id).with_for_update()
     )
@@ -611,7 +646,12 @@ async def complete_production_batch(db: AsyncSession, batch_id: int) -> Producti
             detail=f"Variant {batch.variant_id} not found — cannot complete batch"
         )
 
-    variant.stock_quantity += batch.quantity_to_produce
+    variant.stock_quantity += good_quantity
+    variant.damaged_stock_quantity += damaged_quantity
+
+    batch.good_quantity = good_quantity
+    batch.damaged_quantity = damaged_quantity
+    batch.defect_reason = defect_reason if damaged_quantity > 0 else None
     batch.stage_status = "completed"
     batch.current_stage = "ready_for_shipment"
     batch.completed_at = datetime.utcnow()
@@ -623,7 +663,9 @@ async def complete_production_batch(db: AsyncSession, batch_id: int) -> Producti
         "production.batch_completed",
         batch_id=batch.id,
         variant_id=batch.variant_id,
-        added=batch.quantity_to_produce,
+        good=good_quantity,
+        damaged=damaged_quantity,
         new_variant_stock=variant.stock_quantity,
+        new_variant_damaged_stock=variant.damaged_stock_quantity,
     )
-    return batch
+    return batch, True

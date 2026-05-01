@@ -46,6 +46,7 @@ class ProductVariant(Base):
     color: Mapped[str] = mapped_column(String(100), nullable=False)
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     stock_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    damaged_stock_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     product = relationship("Product", back_populates="variants", lazy="selectin")
 

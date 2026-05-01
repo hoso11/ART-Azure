@@ -1,379 +1,279 @@
-# Azure Web App for Containers — deployment guide (ART) — Docker Hub edition
+# Azure deployment — current state
 
-Target:
-`https://art-front-cwdxfzhgcccvcjeh.germanywestcentral-01.azurewebsites.net`
+This document describes the **live, working Azure deployment** as managed by Terraform in `terraform/envs/dev/`. It supersedes earlier revisions of this file that described the obsolete single-Web-App-with-five-sidecars topology in Germany West Central.
 
-Images are published to **Docker Hub** under the `hoso30` namespace (public).
-
----
-
-## 1. Architecture
+## Current architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Azure Web App for Containers (single plan, one instance)    │
-│                                                              │
-│  MAIN    art-frontend     Next.js 14, port 3000  ← public   │
-│  sidecar art-backend      FastAPI + Alembic, port 8000       │
-│  sidecar art-worker       Celery worker + beat (no port)     │
-│  sidecar art-postgres     Postgres 16, port 5432             │
-│  sidecar art-redis        Redis 7, port 6379                 │
-│  sidecar art-minio        MinIO, port 9000                   │
-│                                                              │
-│  All containers share one network namespace → every hop is   │
-│  127.0.0.1:<port>. Only the main container's port is public. │
-└──────────────────────────────────────────────────────────────┘
+Public internet
+      │
+      │  HTTPS
+      ▼
+┌─────────────────────────────────────────────────────────┐
+│  Azure                                                  │
+│  Resource group: rg-art-dev   (West Europe)             │
+│                                                         │
+│  ┌──────────────────────────┐                           │
+│  │ asp-art-dev (F1 Free)    │                           │
+│  │  └── app-art-frontend-…  │  Next.js 14 standalone    │
+│  │      port 3000           │  (single container)       │
+│  └──────────────────────────┘                           │
+│                                                         │
+│  ┌──────────────────────────┐                           │
+│  │ asp-art-backend-dev (F1) │                           │
+│  │  └── app-art-backend-…   │  FastAPI + Alembic        │
+│  │      port 8000 (main)    │                           │
+│  │      ├── worker sidecar  │  Celery worker + beat     │
+│  │      └── redis sidecar   │  redis:7-alpine, internal │
+│  └──────────────────────────┘                           │
+│                                                         │
+│  psql-art-dev-art4242                                   │
+│   Azure Database for PostgreSQL Flexible Server         │
+│   B_Standard_B1ms, PG 16, 32 GB, North Europe (*)       │
+│                                                         │
+│  startdevimgsart4242                                    │
+│   Azure Storage Account (Standard_LRS, StorageV2, Hot)  │
+│   Container: art-images (private)                       │
+└─────────────────────────────────────────────────────────┘
+
+(*) PostgreSQL exception: `LocationIsOfferRestricted` on the
+subscription forced the Flexible Server into North Europe. Every
+other resource is in West Europe. See CLAUDE.md "PostgreSQL only"
+exception clause.
 ```
 
 ### Request flow
 
-- Browser → `https://…azurewebsites.net/` → Azure terminates TLS → main container (Next.js, `:3000`).
-- Browser → `/api/v1/*` → Next.js rewrite (`next.config.js`) → `http://localhost:8000/api/v1/*` (backend sidecar).
-- Next.js SSR server → `http://localhost:8000/api/v1/*` directly.
-- Backend → Postgres `localhost:5432`, Redis `localhost:6379`, MinIO `localhost:9000`.
-- Worker → Redis `localhost:6379`, Postgres `localhost:5432`, SMTP.
+- Browser → `https://app-art-frontend-dev-art4242.azurewebsites.net/…` → frontend Web App (Next.js, port 3000).
+- Browser → `/api/v1/*` → frontend's Next.js standalone server applies the `next.config.js` rewrite → `https://app-art-backend-dev-art4242.azurewebsites.net/api/v1/*` (separate backend Web App). The destination is **baked into `routes-manifest.json` at frontend image build time** via `INTERNAL_API_URL` — changing it requires a frontend rebuild + push + tag bump.
+- Backend → PostgreSQL Flexible Server (`psql-art-dev-art4242.postgres.database.azure.com:5432`, `sslmode=require`).
+- Backend → Redis sidecar (`localhost:6379`, shared network namespace inside the backend Web App).
+- Backend → Azure Blob Storage (`startdevimgsart4242.blob.core.windows.net`, container `art-images`, private). Browsers never reach Blob directly — product image bytes are streamed through the backend `/api/v1/products/images/file/{key}` proxy via `storage.download_file()`.
+- Worker sidecar → Redis broker, PostgreSQL, Blob storage. Same network namespace as backend.
 
-### Why no nginx
+### What is _not_ in the deployment (intentionally)
 
-In local dev, nginx gave us rate limiting, `client_max_body_size`, and a single public port. In Azure, the platform's front door already terminates TLS and serves as the single public edge; `next.config.js` handles the `/api/*` → backend rewrite. Nginx would only add a hop.
+- **No nginx.** The Azure platform terminates TLS and the Next.js rewrite handles the `/api/*` → backend hop. nginx would only add a hop.
+- **No Postgres sidecar.** Replaced by Azure Database for PostgreSQL Flexible Server in Phase 3.
+- **No MinIO sidecar.** Replaced by Azure Blob Storage in Phase 4. The MinIO sitecontainer resource is still in `main.tf` but defaults to `minio_sidecar_enabled = false`. MinIO remains the local-dev backend in `docker-compose.yml`.
+- **No Application Insights / Log Analytics.** Logs available via portal Log Stream and Kudu only.
+- **No Key Vault.** PostgreSQL admin password lives in `terraform.tfstate` (gitignored).
+- **No CI/CD.** Image builds and `terraform apply` are run from a developer workstation.
 
----
+## Image registry
 
-## 2. Images — what is built vs. pulled
+Public Docker Hub under the `hoso30` namespace.
 
-| Image | Source | Purpose | Sidecar(s) using it |
-|---|---|---|---|
-| `hoso30/art-frontend:TAG` | **built** from `frontend/Dockerfile.azure` | Next.js 14 standalone runtime | `art-frontend` (main) |
-| `hoso30/art-backend:TAG`  | **built** from `backend/Dockerfile.azure`  | FastAPI + Celery (one image, two roles) | `art-backend`, `art-worker` |
-| `postgres:16-alpine`      | Docker Hub (upstream, unchanged) | database | `art-postgres` |
-| `redis:7-alpine`          | Docker Hub (upstream, unchanged) | broker + cache | `art-redis` |
-| `minio/minio:latest`      | Docker Hub (upstream, unchanged) | object storage | `art-minio` |
+- `hoso30/art-frontend:TAG` — built from `frontend/Dockerfile.azure` (multi-stage: `deps → build → runtime`, ships `node server.js` from `.next/standalone`).
+- `hoso30/art-backend:TAG` — built from `backend/Dockerfile`. Reused by the worker sidecar with a different startup command — no separate worker image.
 
-Only two images are custom-built and pushed. The worker reuses the backend image with a different startup command — no separate build.
+Image tag history (relevant):
 
----
-
-## 3. Local validation (before any push)
-
-`docker-compose.azure.yml` mirrors the Azure sidecar topology locally: every service joins one network namespace via `network_mode: service:frontend`, so every inter-service call is `localhost:PORT` — exactly like Azure.
-
-```bash
-cd /c/Users/HP/Desktop/ART-Azure
-cp .env.azure.example .env.azure
-# Edit .env.azure: set SECRET_KEY, POSTGRES_PASSWORD, MINIO_SECRET_KEY.
-
-docker compose -f docker-compose.azure.yml --env-file .env.azure up --build
-```
-
-Open:
-
-- `http://localhost:3000/` — homepage
-- `http://localhost:3000/api/v1/docs` — Swagger (proxied through Next.js to backend)
-- `http://localhost:3000/login` — log in
-
-Seed:
-
-```bash
-docker compose -f docker-compose.azure.yml --env-file .env.azure \
-  exec backend python -m scripts.seed
-```
-
-Seed users: `admin@art-manufacturing.com / admin123456`, `john@mitchell-retail.com / user123456`.
-
-Tear down:
-
-```bash
-docker compose -f docker-compose.azure.yml --env-file .env.azure down -v
-```
-
-If local passes, the images are Azure-ready.
-
----
-
-## 4. Build & push to Docker Hub
-
-You are already logged in as `hoso30`. Scripts live in `scripts/azure/` (PowerShell + bash variants).
-
-### Quick path — one command
-
-PowerShell:
-```powershell
-.\scripts\azure\release.ps1 -Tag v1
-```
-
-Bash (Git Bash / WSL):
-```bash
-TAG=v1 ./scripts/azure/release.sh
-```
-
-This builds both images and pushes them to `hoso30/art-frontend:v1` and `hoso30/art-backend:v1`.
-
-### Build only
-
-PowerShell:
-```powershell
-.\scripts\azure\build.ps1 -Tag v1
-```
-
-Bash:
-```bash
-TAG=v1 ./scripts/azure/build.sh
-```
-
-### Push only (after build)
-
-PowerShell:
-```powershell
-.\scripts\azure\push.ps1 -Tag v1
-```
-
-Bash:
-```bash
-TAG=v1 ./scripts/azure/push.sh
-```
-
-### Manual equivalent (if you want to run docker directly)
-
-```bash
-# Backend
-docker build -f backend/Dockerfile.azure -t hoso30/art-backend:v1 ./backend
-docker push hoso30/art-backend:v1
-
-# Frontend (NEXT_PUBLIC_* are baked in at build time)
-docker build -f frontend/Dockerfile.azure \
-  --build-arg NEXT_PUBLIC_APP_NAME="ART Manufacturing" \
-  --build-arg NEXT_PUBLIC_API_URL="/api/v1" \
-  --build-arg NEXT_PUBLIC_MINIO_URL="" \
-  -t hoso30/art-frontend:v1 ./frontend
-docker push hoso30/art-frontend:v1
-```
-
-Since the Docker Hub repo is public, Azure does not need pull credentials.
-
----
-
-## 5. Azure Web App configuration
-
-### Option A — Portal
-
-1. **App Services → `art-front-cwdxfzhgcccvcjeh` → Deployment Center**
-   - Source: **Docker Hub**.
-   - Access type: **Public**.
-   - Image and tag: `hoso30/art-frontend:v1`.
-   - Save.
-2. **Configuration → General Settings**
-   - Stack: **Docker**.
-   - Always On: **On**.
-   - HTTPS Only: **On**.
-   - FTP state: **Disabled**.
-   - **Startup Command: leave blank.** The frontend image's `CMD` is `node server.js` and must run. Do NOT set `npm start` / `next start` — they don't work with `output: "standalone"` and will crash-loop the main container (the standalone build only ships `server.js`).
-3. **Configuration → Application Settings** — add every setting from section 6 below. Especially `WEBSITES_PORT=3000`.
-4. **Deployment Center → Containers (sidecars)** — click **+ Add** for each sidecar:
-
-   | Name | Image source | Image | Target port | Startup command |
-   |---|---|---|---|---|
-   | `art-backend`  | Docker Hub (public) | `hoso30/art-backend:v1`    | `8000` | *(leave blank — image default)* |
-   | `art-worker`   | Docker Hub (public) | `hoso30/art-backend:v1`    | `9999` | `celery -A app.worker.celery_app worker --beat --loglevel=info` |
-   | `art-postgres` | Docker Hub (public) | `postgres:16-alpine`       | `5432` | *(leave blank)* |
-   | `art-redis`    | Docker Hub (public) | `redis:7-alpine`           | `6379` | *(leave blank)* |
-   | `art-minio`    | Docker Hub (public) | `minio/minio:latest`       | `9000` | `server /data` |
-
-> **MinIO note.** Do NOT paste `server /data --console-address ":9001"` — Azure's shell parsing mangles the quoted `:9001` and MinIO fails with `Unable to split host port ":9001": invalid port number`. The console is unreachable in Azure anyway (only `WEBSITES_PORT` is public), so omit it. If you really want the console, use `server /data --console-address 0.0.0.0:9001` with no quotes.
-
-   Notes:
-   - `art-worker` doesn't listen on any port. Azure still requires `--target-port`; `9999` is an arbitrary unused value — nothing routes to it.
-   - Only the MAIN container's `WEBSITES_PORT` is public.
-   - **Do NOT wrap sidecar startup commands in `bash -c "…"`.** Azure adds its own shell wrapper and eats the outer quotes, yielding `unexpected EOF while looking for matching "'`. Use a single unnested command. The `--beat` flag lets one Celery worker process also run the Beat scheduler, which is fine for a single-instance deployment.
-5. **Restart** the Web App.
-6. **Log stream** to watch startup.
-
-### Option B — Azure CLI
-
-```bash
-RG=rg-art-azure
-APP=art-front-cwdxfzhgcccvcjeh
-
-# Main container
-az webapp config container set -g $RG -n $APP \
-  --docker-custom-image-name docker.io/hoso30/art-frontend:v1
-
-az webapp config set -g $RG -n $APP --always-on true
-
-# Sidecars (az CLI ≥ 2.63 required for sitecontainers)
-az webapp sitecontainers create -g $RG -n $APP --container-name backend \
-  --image docker.io/hoso30/art-backend:v1 --target-port 8000 --is-main false
-
-az webapp sitecontainers create -g $RG -n $APP --container-name worker \
-  --image docker.io/hoso30/art-backend:v1 --target-port 9999 --is-main false \
-  --start-up-command 'celery -A app.worker.celery_app worker --beat --loglevel=info'
-
-az webapp sitecontainers create -g $RG -n $APP --container-name postgres \
-  --image docker.io/library/postgres:16-alpine --target-port 5432 --is-main false
-
-az webapp sitecontainers create -g $RG -n $APP --container-name redis \
-  --image docker.io/library/redis:7-alpine --target-port 6379 --is-main false
-
-az webapp sitecontainers create -g $RG -n $APP --container-name minio \
-  --image docker.io/minio/minio:latest --target-port 9000 --is-main false \
-  --start-up-command 'server /data --console-address ":9001"'
-
-az webapp restart -g $RG -n $APP
-```
-
----
-
-## 6. Application Settings
-
-Paste as JSON via **App Service → Configuration → Application Settings → Advanced edit**. Every setting below is injected into every container (main + all sidecars).
-
-```json
-[
-  { "name": "WEBSITES_PORT",                       "value": "3000" },
-  { "name": "WEBSITES_CONTAINER_START_TIME_LIMIT", "value": "600" },
-  { "name": "WEBSITES_ENABLE_APP_SERVICE_STORAGE", "value": "false" },
-
-  { "name": "APP_NAME",   "value": "ART Manufacturing" },
-  { "name": "APP_ENV",    "value": "production" },
-  { "name": "DEBUG",      "value": "false" },
-  { "name": "LOG_FORMAT", "value": "json" },
-
-  { "name": "SECRET_KEY",                      "value": "GENERATE_A_64_CHAR_RANDOM_STRING" },
-  { "name": "JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "value": "15" },
-  { "name": "JWT_REFRESH_TOKEN_EXPIRE_DAYS",   "value": "7" },
-  { "name": "ALLOWED_ORIGINS",                 "value": "https://art-front-cwdxfzhgcccvcjeh.germanywestcentral-01.azurewebsites.net" },
-
-  { "name": "POSTGRES_USER",     "value": "art_user" },
-  { "name": "POSTGRES_PASSWORD", "value": "CHANGE_ME" },
-  { "name": "POSTGRES_DB",       "value": "art_manufacturing" },
-  { "name": "DATABASE_URL",      "value": "postgresql+asyncpg://art_user:CHANGE_ME@localhost:5432/art_manufacturing" },
-  { "name": "DATABASE_URL_SYNC", "value": "postgresql://art_user:CHANGE_ME@localhost:5432/art_manufacturing" },
-
-  { "name": "REDIS_URL",             "value": "redis://localhost:6379/0" },
-  { "name": "CELERY_BROKER_URL",     "value": "redis://localhost:6379/0" },
-  { "name": "CELERY_RESULT_BACKEND", "value": "redis://localhost:6379/1" },
-
-  { "name": "STORAGE_BACKEND",         "value": "minio" },
-  { "name": "MINIO_ENDPOINT",          "value": "localhost:9000" },
-  { "name": "MINIO_ACCESS_KEY",        "value": "minioadmin" },
-  { "name": "MINIO_SECRET_KEY",        "value": "CHANGE_ME" },
-  { "name": "MINIO_BUCKET",            "value": "art-images" },
-  { "name": "MINIO_USE_SSL",           "value": "false" },
-  { "name": "MINIO_EXTERNAL_ENDPOINT", "value": "localhost:9000" },
-
-  { "name": "SMTP_HOST",    "value": "localhost" },
-  { "name": "SMTP_PORT",    "value": "1025" },
-  { "name": "SMTP_FROM",    "value": "noreply@art-manufacturing.com" },
-  { "name": "SMTP_USE_TLS", "value": "false" },
-
-  { "name": "INTERNAL_API_URL", "value": "http://localhost:8000" },
-  { "name": "NODE_ENV",         "value": "production" }
-]
-```
-
-### Settings classification
-
-- **Required at runtime** (backend + worker won't start without them):
-  `SECRET_KEY`, `DATABASE_URL`, `DATABASE_URL_SYNC`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `REDIS_URL`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `STORAGE_BACKEND`, `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `ALLOWED_ORIGINS`, `APP_ENV`.
-- **Required for the Azure platform**: `WEBSITES_PORT=3000` (must match main container's listen port).
-- **Required for Next.js rewrite**: `INTERNAL_API_URL=http://localhost:8000`.
-- **Optional / defaults are fine**: `APP_NAME`, `DEBUG`, `LOG_FORMAT`, `JWT_*`, `SMTP_*`, `MINIO_USE_SSL`, `MINIO_EXTERNAL_ENDPOINT`, `WEBSITES_CONTAINER_*`.
-- **Build-time only (frontend image)** — NOT to be set as App Settings:
-  `NEXT_PUBLIC_APP_NAME`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_MINIO_URL`. These are baked into the client bundle when the frontend image is built. **Changing them requires a frontend rebuild + push + redeploy.**
-
----
-
-## 7. Sidecar details — what actually happens on boot
-
-1. Azure starts all containers in parallel.
-2. `art-postgres` (upstream image) initializes the DB on first boot and listens on `:5432`.
-3. `art-redis` binds `:6379` within ~2s.
-4. `art-minio` binds `:9000` within ~3s.
-5. `art-backend` runs `alembic upgrade head` (Dockerfile.azure CMD) and then `uvicorn --workers 2`. Alembic retries transparently while Postgres is still coming up. Ready within 20–45s. The MinIO bucket `art-images` is auto-created and given public-read policy on first upload (see `backend/app/storage/minio_adapter.py`).
-6. `art-worker` starts `celery worker` + `celery beat`. If Redis isn't ready yet, Celery retries.
-7. `art-frontend` runs `node server.js` and listens on `:3000`. Ready in 3–5s.
-8. Azure health probe against the main container on `WEBSITES_PORT=3000` succeeds → public URL serves traffic.
-
-Sidecar filesystems are ephemeral. Postgres and MinIO data do NOT survive restarts, scale operations, or plan changes. For real production, swap to Azure Database for PostgreSQL + Azure Blob Storage (`STORAGE_BACKEND=azure`, set `AZURE_STORAGE_CONNECTION_STRING`).
-
----
-
-## 8. Redeploy / update / restart
-
-After you push a new image tag:
-
-**Portal**:
-- For the main container: **Deployment Center** → update the tag → Save.
-- For a sidecar: **Deployment Center → Containers** → edit the sidecar row → update image/tag → Save.
-- Click **Restart** on the Web App.
-
-**CLI**:
-```bash
-az webapp config container set -g $RG -n $APP \
-  --docker-custom-image-name docker.io/hoso30/art-frontend:v2
-
-az webapp sitecontainers update -g $RG -n $APP --container-name backend \
-  --image docker.io/hoso30/art-backend:v2
-
-az webapp restart -g $RG -n $APP
-```
-
-If only App Settings changed, a restart is enough — no image change required.
-
----
-
-## 9. Verification
-
-After restart, confirm:
-
-- `https://art-front-…/` renders the landing page.
-- `https://art-front-…/api/v1/docs` shows Swagger.
-- `https://art-front-…/login` → log in with the seed admin → redirect to `/dashboard`.
-- **Log stream** (`az webapp log tail -g $RG -n $APP`) shows:
-  - `art-backend`: `Uvicorn running on http://0.0.0.0:8000`.
-  - `art-worker`: `celery@… ready.`
-  - `art-frontend`: `- Local:        http://0.0.0.0:3000`.
-
-Seed the database (first deploy only) via Kudu SSH on the backend sidecar:
-```bash
-python -m scripts.seed
-```
-
----
-
-## 10. Troubleshooting
-
-| Symptom | Likely cause | Fix |
+| Tag | Status | Notes |
 |---|---|---|
-| Public URL returns "Application Error" | Main container crashed or exceeded 230s startup | `az webapp log tail -g $RG -n $APP`; check frontend logs. Almost always a missing App Setting or wrong `WEBSITES_PORT` |
-| `502 Bad Gateway` | Main container not listening on `WEBSITES_PORT` | Confirm `WEBSITES_PORT=3000`; frontend log must show bind on `:3000` |
-| `/api/v1/*` returns 404 HTML from Next.js | Rewrite not in effect | Set `INTERNAL_API_URL=http://localhost:8000`; confirm `next.config.js` was shipped in the frontend image |
-| Login succeeds but later calls return 401 | `Secure` cookie on non-HTTPS URL | The public URL must be HTTPS. Also check `ALLOWED_ORIGINS` matches exactly (scheme + host, no trailing slash) |
-| Backend log: `connection refused` to `localhost:5432` | Postgres sidecar not yet ready on first boot | Harmless — Alembic retries. Persistent → verify `POSTGRES_*` vars match `DATABASE_URL` |
-| Worker log: `kombu.exceptions.OperationalError` | Redis not ready | Harmless on first boot; persistent → verify `CELERY_BROKER_URL=redis://localhost:6379/0` |
-| Product images show broken icons | Presigned URLs point at `localhost:9000` | Expected with the MinIO sidecar. Switch to `STORAGE_BACKEND=azure` + Blob Storage to fix |
-| Image pull fails | Wrong image path | Must be `docker.io/hoso30/art-backend:TAG` (or `hoso30/art-backend:TAG` — Azure accepts both) |
-| Sidecar looks up but backend can't reach it | Wrong `--target-port` | The declared port must match what the service inside actually listens on |
-| Postgres data gone after redeploy | Sidecar FS is ephemeral | Expected. Re-seed via `python -m scripts.seed` in backend sidecar |
-| `az webapp sitecontainers …` — command not found | Old az CLI | `az upgrade`; CLI ≥ 2.63 is required |
-| NEXT_PUBLIC_* value didn't change after App Setting edit | Values are baked at build time | Rebuild frontend image with new `--build-arg`, push, redeploy |
+| `art-backend:v13` | **Forbidden** | Failed migration `009`; `backend/entrypoint.sh` whitelist exists to recover from it. See `handoff/KNOWN_RISKS.md` #2. |
+| `art-backend:v20` | Retired | Pre-Azure-Blob baseline. |
+| `art-backend:v21` | **Live** | Backend-agnostic image proxy (works with both MinIO and Azure Blob). Phase 5 image gallery support. |
+| `art-frontend:v20` | Retired | Last working pre-gallery frontend. |
+| `art-frontend:v21` | **Forbidden** | Built from `frontend/Dockerfile` (dev mode `npm run dev`); crashed at runtime in Azure with PostCSS / Tailwind error. |
+| `art-frontend:v22` | **Forbidden** | Production build, but MSYS-mangled `NEXT_PUBLIC_API_URL` poisoned every client-side fetch. |
+| `art-frontend:v23` | **Forbidden** | Same MSYS poisoning as v22 plus the v23 modal defensive logic. |
+| `art-frontend:v24` | **Live** | Built with `MSYS_NO_PATHCONV=1`. Clean `/api/v1` base URL. Ships defensive modal logic from v23. |
 
-Kudu (container exec, log stream, file explorer):
-`https://art-front-cwdxfzhgcccvcjeh.scm.germanywestcentral-01.azurewebsites.net`
+`v13`, `v21`, `v22`, `v23` are blocked by the `frontend_image_tag` validation in `terraform/envs/dev/variables.tf` so they cannot be redeployed accidentally.
 
----
+## Deployment workflow
 
-## 11. Checklist
+Terraform is the source of truth. **Do not** make changes through the Azure Portal or `az` CLI — they will drift away from state and be overwritten on the next `terraform apply`.
 
-- [ ] Logged into Docker Hub as `hoso30` (`docker login`).
-- [ ] `.env.azure` created from `.env.azure.example` with strong secrets.
-- [ ] Local Azure compose validated: `docker compose -f docker-compose.azure.yml --env-file .env.azure up --build` → login + dashboard work.
-- [ ] `.\scripts\azure\release.ps1 -Tag v1` (or `./scripts/azure/release.sh`) succeeded — both images are on Docker Hub.
-- [ ] App Service main container set to `hoso30/art-frontend:v1`.
-- [ ] All 5 sidecars created (`backend`, `worker`, `postgres`, `redis`, `minio`) with correct ports and startup commands.
-- [ ] `WEBSITES_PORT=3000` present in App Settings.
-- [ ] Every required App Setting from section 6 populated (no `CHANGE_ME` left).
-- [ ] `ALLOWED_ORIGINS` matches the public URL exactly.
-- [ ] App Service restarted; log stream shows backend on `:8000`, worker `ready`, frontend on `:3000`.
-- [ ] Browser: `/login` → login → `/dashboard` renders stats.
+### Standard apply
 
-When every box ticks, Azure is live.
+```bash
+cd terraform/envs/dev
+source .env.terraform                  # loads ARM_* env vars
+terraform fmt -recursive
+terraform validate
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+`source .env.terraform` only affects the current shell — re-source in a new terminal. Do **not** use `az login` or any other Azure CLI command (see CLAUDE.md "Terraform Authentication Rule").
+
+### Publishing a new image and rolling it out
+
+1. **Build** locally. Frontend production build (run from Git Bash on Windows) **must** use `MSYS_NO_PATHCONV=1` to prevent path-arg mangling — see CLAUDE.md "Building Docker images on Windows / Git Bash":
+
+   ```bash
+   # Backend
+   docker build -f backend/Dockerfile -t hoso30/art-backend:vN ./backend
+
+   # Frontend (Git Bash on Windows)
+   MSYS_NO_PATHCONV=1 docker build -f frontend/Dockerfile.azure -t hoso30/art-frontend:vN \
+     --build-arg "INTERNAL_API_URL=https://app-art-backend-dev-art4242.azurewebsites.net" \
+     --build-arg "NEXT_PUBLIC_API_URL=/api/v1" \
+     --build-arg "NEXT_PUBLIC_APP_NAME=ART Manufacturing" \
+     ./frontend
+   ```
+
+2. **Verify** the frontend image isn't poisoned before pushing:
+
+   ```bash
+   docker run --rm hoso30/art-frontend:vN sh -c \
+     'find /app/.next -name "*.js" -exec grep -l "C:/Program Files/Git" {} \; 2>/dev/null'
+   # Empty output required. Any match → do not push.
+   ```
+
+3. **Push:**
+
+   ```bash
+   docker push hoso30/art-backend:vN
+   docker push hoso30/art-frontend:vN
+   ```
+
+4. **Bump the tag** in `terraform/envs/dev/terraform.tfvars` (and the default in `variables.tf` if you also want to change the default for other envs).
+
+5. **Apply** as above. Expected plan shape: `1 to change, 0 to add, 0 to destroy` (or `2 to change` if you bump both tags). Anything else means an unrelated drift; investigate before applying.
+
+### Verification after apply
+
+```bash
+terraform output | grep -E "deployed_image|backend_image|frontend_url|backend_url"
+
+# Frontend (must serve the homepage HTML, no build errors)
+curl -s -o /tmp/fe.html -w "HTTP %{http_code}\n" "$(terraform output -raw frontend_url)/"
+grep -ci "Module parse failed\|Failed to compile" /tmp/fe.html  # must be 0
+
+# Backend (must return JSON)
+curl -i "$(terraform output -raw backend_url)/api/v1/products/public?limit=8" | head -5
+
+# Verify the deployed v24 chunk has no MSYS-poisoned URL
+CHUNK=$(curl -s "$(terraform output -raw frontend_url)/dashboard/production" \
+  | grep -oE '/_next/static/chunks/app/dashboard/production/page-[a-f0-9]+\.js' | head -1)
+curl -s "$(terraform output -raw frontend_url)$CHUNK" | grep -c "C:/Program Files/Git"
+# Must be 0.
+```
+
+If Azure responds during apply with `HTTP response was nil; connection may have been reset`, retry once with `terraform apply -refresh=false`.
+
+## Application settings (managed by Terraform)
+
+App Service application settings on the backend Web App are set in `main.tf` and **must not** be edited manually in the portal. The relevant ones:
+
+| Setting | Value | Source |
+|---|---|---|
+| `WEBSITES_PORT` | `8000` (backend) / `3000` (frontend) | hardcoded |
+| `APP_ENV` | `production` | hardcoded |
+| `LOG_FORMAT` | `json` | hardcoded |
+| `SECRET_KEY` | tfvars / generated | `var.backend_secret_key` |
+| `DATABASE_URL` (asyncpg) | computed | Postgres FQDN + admin password + `?ssl=require` |
+| `DATABASE_URL_SYNC` (psycopg2) | computed | Postgres FQDN + admin password + `?sslmode=require` |
+| `REDIS_URL`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` | `redis://localhost:6379/…` | shared network namespace inside backend Web App |
+| `STORAGE_BACKEND` | `azure` | tfvars (was `minio` pre-Phase-4) |
+| `AZURE_STORAGE_CONNECTION_STRING` | computed | from `azurerm_storage_account.this.primary_connection_string`, sensitive |
+| `AZURE_BLOB_CONTAINER` | `art-images` | tfvars |
+| `INTERNAL_API_URL` | backend Web App URL | only consumed by frontend image at **build time** — App Setting present for completeness |
+| `ALLOWED_ORIGINS` | frontend URL | for CORS / cookie handling |
+
+The frontend Web App also has an `INTERNAL_API_URL` setting, but that value is **inert** because Next.js standalone bakes the rewrite destination at build time. The build-arg above is what actually wires the routing.
+
+## Critical Data Protection (PostgreSQL & Azure Blob Storage)
+
+The PostgreSQL Flexible Server and the Azure Storage Account hold every order, customer, product, audit-log row, and uploaded product image. They are protected by **two independent layers** and both must remain in place by default.
+
+**Layer 1 — Terraform `prevent_destroy = true`** is set in lifecycle blocks on:
+
+- `azurerm_postgresql_flexible_server.this`
+- `azurerm_postgresql_flexible_server_database.app`
+- `azurerm_storage_account.images`
+- `azurerm_storage_container.images`
+
+Any `terraform plan` containing a destroy or replace for these fails before apply.
+
+**Layer 2 — Azure resource locks** (`CanNotDelete`, free under Resource Manager) declared in `main.tf` as:
+
+- `azurerm_management_lock.postgres_no_delete` → scope: Postgres server (covers the database)
+- `azurerm_management_lock.storage_no_delete` → scope: Storage Account (covers the container and all blobs)
+
+Locks block DELETE via portal, `az` CLI, ARM API, and Terraform itself. They allow reads and updates, so:
+
+- bumping `frontend_image_tag` / `backend_image_tag` ✓
+- changing an `app_settings` value ✓
+- creating or updating containers / blobs / firewall rules ✓
+- rotating the Postgres admin password ✓
+- rotating Storage Account access keys ✓
+
+…all continue to work. Only DELETE is blocked.
+
+### Pre-apply checklist (mandatory before every `terraform apply`)
+
+Scan the plan output for any of these strings — **any match means stop and surface to the user**:
+
+- `-/+ azurerm_postgresql_flexible_server.this`
+- `-/+ azurerm_postgresql_flexible_server_database.app`
+- `-/+ azurerm_storage_account.images`
+- `-/+ azurerm_storage_container.images`
+- `-/+ azurerm_management_lock.postgres_no_delete`
+- `-/+ azurerm_management_lock.storage_no_delete`
+- any `- destroy` against the names above
+
+The expected shape for normal changes (image bump, app-setting tweak) is `N to change, 0 to add, 0 to destroy` against the Web App resources only.
+
+### Removing the protections (only foreseen scenario: West Europe migration)
+
+When the `LocationIsOfferRestricted` subscription block lifts and PostgreSQL is migrated from North Europe to West Europe, the recreate is genuinely required. The procedure (each step is its own user approval):
+
+1. `pg_dump` of `art_manufacturing` to a local file. Verify the dump opens cleanly in `pg_restore --list`.
+2. Comment out `azurerm_management_lock.postgres_no_delete` in `main.tf`. `terraform apply` → lock removed.
+3. Comment out `prevent_destroy = true` on both Postgres lifecycle blocks (server + database). `terraform apply` with the new `postgres_location = "West Europe"` → server recreated.
+4. `pg_restore` from the dump.
+5. Restore both lifecycle lines and the lock resource. `terraform apply` → re-protected.
+
+Same procedure with Storage analogues if the Storage Account ever needs to be recreated (replace `pg_dump`/`pg_restore` with `azcopy` blob-to-blob copy).
+
+## Cost guardrails ($0 target while the 12-month free tier runs)
+
+- **App Service Plans must remain F1 Free.** Both `asp-art-dev` and `asp-art-backend-dev`.
+- **PostgreSQL Flexible Server must remain `B_Standard_B1ms`** with 32 GB storage, 7-day backup retention, no HA, no geo-redundant backups. The free 12-month allowance covers exactly one B1MS server per subscription. Validation in `variables.tf` and a `lifecycle.precondition` block both enforce this.
+- **Storage Account must remain `Standard_LRS`, StorageV2, Hot tier.** Free 12-month allowance: 5 GB storage, 20 000 reads, 10 000 writes per month. Public-blob access is disabled at account level; the `art-images` container is private. Watch `Cost analysis` for any deviation.
+- **No paid resource added without explicit approval and a Cost Impact block** (see CLAUDE.md §6).
+- **Set a $1/month subscription budget** with email alerts. Anything above $0 during the 12-month window is a regression.
+
+After the 12-month window expires, B1MS bills ~$15/month and 32 GB SSD bills ~$3.70/month — see `terraform/envs/dev/README.md` "Cost after the 12-month free tier expires" section for the migration plan.
+
+## Verifying confirmed-working features
+
+Each feature below is part of the live deployment as of v24 (frontend) / v21 (backend):
+
+| Feature | Manual check |
+|---|---|
+| Homepage renders | `curl -i "$(terraform output -raw frontend_url)/"` → HTTP 200, ≥30 KB HTML, no build-error markers |
+| Login + dashboard | Browser: log in as `admin@art-manufacturing.com / admin123456`, hit `/dashboard` |
+| Public product list | `curl -i "$(terraform output -raw backend_url)/api/v1/products/public?limit=8"` → HTTP 200, JSON `{items:[...], total, page, limit}` |
+| Product image gallery | Open `/catalog/<id>`. Click a thumbnail to open the lightbox. ←/→/Esc work |
+| Production modal product dropdown | `/dashboard/production` → "Ստեղծել արտադրություն" → "Ապրանք *" populates with all products |
+| Image upload to Azure Blob | Admin: `/dashboard/products/<id>` → upload a JPG/PNG/WebP → see it appear in the gallery; HEAD request to `/api/v1/products/images/file/<key>` returns `image/*` |
+| Audit log | `/dashboard/activity` shows recent mutations with Armenian action labels |
+
+## Known limitations (current state, not bugs)
+
+1. **F1 cold starts** add 30–60 s after ~20 min idle. `always_on` is unavailable on F1; mitigate at the app layer (warm-up ping) or accept it for dev usage.
+2. **F1 daily CPU budget** is 60 min/day across each plan. A runaway worker task can exhaust it; check `/Cost+Quotas` if requests start returning 403.
+3. **PostgreSQL is in North Europe** while everything else is in West Europe. Caused by `LocationIsOfferRestricted`; cross-region egress stays inside the 100 GB/month always-free allowance for any realistic dev workload. To consolidate when the restriction is lifted, set `postgres_location = "West Europe"` and re-apply (recreates the server — `pg_dump` first).
+4. **B1MS connection cap (~50)** vs. SQLAlchemy `pool_size=20, max_overflow=10` × uvicorn `--workers 2` → worst-case 60 connections. Mitigations in `terraform/envs/dev/README.md`.
+5. **Backend `/health` endpoint** runs alembic on first cold start, so the very first request after a deploy can take 20–45 s.
+
+## Where to look when something breaks
+
+- **Frontend Web App logs:** Portal → `app-art-frontend-dev-art4242` → Monitoring → Log stream. Or Kudu: `https://app-art-frontend-dev-art4242.scm.azurewebsites.net`.
+- **Backend Web App logs (all containers):** Portal → `app-art-backend-dev-art4242` → Monitoring → Log stream. Per-sidecar logs: Deployment Center → Containers → click container row → Logs.
+- **PostgreSQL queries:** `psql "host=$(terraform output -raw postgres_fqdn) port=5432 user=$(terraform output -raw postgres_admin_user) dbname=$(terraform output -raw postgres_database) sslmode=require"` with `PGPASSWORD="$(terraform output -raw postgres_admin_password)"`.
+- **Storage Account contents:** Portal → `startdevimgsart4242` → Containers → `art-images`. Or `az storage blob list -c art-images --account-name startdevimgsart4242` (this is one of the few `az` commands acceptable for read-only diagnostics; Terraform auth still uses the SP).
+- **Image-tag drift:** `terraform output | grep image`. If the deployed value doesn't match what's in `terraform.tfvars`, somebody applied without committing — investigate before re-applying.
+
+## Related docs
+
+- `terraform/envs/dev/README.md` — variable reference, free-tier rules, expected plans, destroy procedure.
+- `handoff/CURRENT_STATE.md` — branch / migration / test status snapshot.
+- `handoff/KNOWN_RISKS.md` — incident-driven failure modes and rules.
+- `handoff/SAFE_TASK_RULES.md` — operational guardrails.
+- `CLAUDE.md` — Terraform auth rule, Windows-build rule, free-tier allowlist, Armenian text rules.

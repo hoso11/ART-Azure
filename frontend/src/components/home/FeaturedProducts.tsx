@@ -1,24 +1,9 @@
 import { Product } from "@/types";
 import { formatCurrency } from "@/lib/utils";
+import { ProductCardImage } from "@/components/products/ProductCardImage";
 
 interface FeaturedProductsProps {
   products: Product[];
-}
-
-function ProductPlaceholder() {
-  return (
-    <svg className="h-16 w-16 text-brand-200" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
-    </svg>
-  );
-}
-
-function getProductPrimaryImage(product: Product): string | null {
-  const primary = product.images?.find((img) => img.is_primary);
-  if (primary?.url) return primary.url;
-  const first = product.images?.[0];
-  if (first?.url) return first.url;
-  return null;
 }
 
 export function FeaturedProducts({ products }: FeaturedProductsProps) {
@@ -39,23 +24,15 @@ export function FeaturedProducts({ products }: FeaturedProductsProps) {
             const minPrice = product.variants.length
               ? Math.min(...product.variants.map((v) => v.price))
               : 0;
-            const imageUrl = getProductPrimaryImage(product);
             return (
               <div
                 key={product.id}
                 className="bg-white border border-gray-200 rounded-lg overflow-hidden hover:shadow-md transition-shadow"
               >
-                <div className="h-48 bg-brand-50 flex items-center justify-center">
-                  {imageUrl ? (
-                    <img
-                      src={imageUrl}
-                      alt={product.name}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <ProductPlaceholder />
-                  )}
-                </div>
+                <ProductCardImage
+                  images={product.images || []}
+                  productName={product.name}
+                />
                 <div className="p-4">
                   <p className="text-xs text-brand-500 font-medium uppercase">{product.category?.name}</p>
                   <h3 className="font-semibold text-gray-900 mt-1">{product.name}</h3>

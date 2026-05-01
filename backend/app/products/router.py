@@ -11,7 +11,6 @@ from app.exceptions import NotFoundException, ValidationException
 from app.products import service, schemas
 from app.products.schemas import CategoryCreate, CategoryUpdate, CategoryResponse
 from app.storage.interface import get_storage_service, StorageService
-from app.storage.minio_adapter import MinIOStorageService
 from app.users.models import User, UserRole
 from app.activity import service as activity_service
 
@@ -427,24 +426,17 @@ async def stream_image_file(
     storage_key: str,
     storage: StorageService = Depends(get_storage_service),
 ):
-    """Stream a product image through the backend so the browser doesn't need
-    direct network access to the MinIO sidecar. Public — the bucket policy is
-    already public-read. Called by browsers via the Next.js /api/* rewrite."""
-    if not isinstance(storage, MinIOStorageService):
-        raise NotFoundException(detail="Image proxy only available for MinIO backend", code="proxy_unsupported")
+    """Stream a product image through the backend. Backend-agnostic: works
+    with either the MinIO local-dev sidecar (public-read bucket) or the
+    Azure Blob private container in deployed envs. Called by browsers via
+    the Next.js /api/* rewrite — never reaches the storage layer directly."""
     try:
-        resp = storage.client.get_object(settings.minio_bucket, storage_key)
+        data, content_type = await storage.download_file(storage.bucket, storage_key)
     except Exception:
         raise NotFoundException(detail="Image not found", code="image_not_found")
-    try:
-        data = resp.read()
-        content_type = resp.headers.get("Content-Type", "application/octet-stream")
-    finally:
-        resp.close()
-        resp.release_conn()
     return Response(
         content=data,
-        media_type=content_type,
+        media_type=content_type or "application/octet-stream",
         headers={"Cache-Control": "public, max-age=3600"},
     )
 

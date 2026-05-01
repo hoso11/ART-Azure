@@ -368,14 +368,22 @@ async def test_batch_create_and_complete_audited_idempotent(
     assert len(created_rows) == 1
     assert created_rows[0].new_values["quantity_to_produce"] == 4
 
-    # First completion → audited.
-    await client.patch(f"/api/v1/production/batches/{bid}/complete", cookies=admin_cookies)
+    # First completion → audited. New contract requires good+damaged body.
+    complete_body = {"good_quantity": 4, "damaged_quantity": 0}
+    await client.patch(
+        f"/api/v1/production/batches/{bid}/complete",
+        json=complete_body, cookies=admin_cookies,
+    )
     # Second completion → idempotent, no extra audit row.
-    await client.patch(f"/api/v1/production/batches/{bid}/complete", cookies=admin_cookies)
+    await client.patch(
+        f"/api/v1/production/batches/{bid}/complete",
+        json=complete_body, cookies=admin_cookies,
+    )
 
     completed_rows = await _logs_with_action(db_session, "production.batch_completed")
     assert len(completed_rows) == 1
-    assert completed_rows[0].new_values["quantity_added_to_variant"] == 4
+    assert completed_rows[0].new_values["good_quantity"] == 4
+    assert completed_rows[0].new_values["damaged_quantity"] == 0
 
 
 @pytest.mark.asyncio
