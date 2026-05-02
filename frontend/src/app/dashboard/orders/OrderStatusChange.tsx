@@ -4,31 +4,40 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 
-const TRANSITIONS: Record<string, string[]> = {
-  draft: ["confirmed", "cancelled"],
-  confirmed: ["in_production", "cancelled"],
-  in_production: ["completed", "cancelled"],
-  completed: ["shipped"],
-  shipped: [],
-  cancelled: [],
-};
+const ALLOWED_STATUSES = ["draft", "confirmed", "completed"] as const;
 
+// Active labels + read-only historical labels so the confirmation banner
+// renders Armenian text when an order is rescued from a deprecated status.
 const STATUS_LABELS: Record<string, string> = {
   draft: "Սևագիր",
   confirmed: "Հաստատված",
-  in_production: "Արտադրության մեջ",
   completed: "Ավարտված",
+  in_production: "Արտադրության մեջ",
   shipped: "Առաքված",
   cancelled: "Չեղարկված",
 };
 
-export function OrderStatusChange({ orderId, currentStatus }: { orderId: number; currentStatus: string }) {
+export function OrderStatusChange({
+  orderId,
+  currentStatus,
+  blockComplete = false,
+  blockCompleteReason,
+}: {
+  orderId: number;
+  currentStatus: string;
+  /** True when stock is insufficient — prevents the `completed` button from firing.
+   * Backend remains the source of truth; this is a UX hint only. */
+  blockComplete?: boolean;
+  blockCompleteReason?: string;
+}) {
   const router = useRouter();
   const [confirming, setConfirming] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const allowed = TRANSITIONS[currentStatus] || [];
+  // Source can be any value (including deprecated). Targets are the three
+  // allowed statuses minus the current one.
+  const allowed = ALLOWED_STATUSES.filter((s) => s !== currentStatus);
   if (allowed.length === 0) return null;
 
   const handleChange = async (newStatus: string) => {
@@ -88,19 +97,21 @@ export function OrderStatusChange({ orderId, currentStatus }: { orderId: number;
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
-          {allowed.map((s) => (
-            <button
-              key={s}
-              onClick={() => setConfirming(s)}
-              className={`px-3 py-1 text-xs font-medium rounded border transition-colors ${
-                s === "cancelled"
-                  ? "border-red-200 text-red-700 hover:bg-red-50"
-                  : "border-brand-200 text-brand-700 hover:bg-brand-50"
-              }`}
-            >
-              {STATUS_LABELS[s]}
-            </button>
-          ))}
+          {allowed.map((s) => {
+            const isComplete = s === "completed";
+            const disabled = isComplete && blockComplete;
+            return (
+              <button
+                key={s}
+                onClick={() => !disabled && setConfirming(s)}
+                disabled={disabled}
+                title={disabled ? blockCompleteReason : undefined}
+                className={`px-3 py-1 text-xs font-medium rounded border transition-colors border-brand-200 text-brand-700 hover:bg-brand-50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent`}
+              >
+                {STATUS_LABELS[s]}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>

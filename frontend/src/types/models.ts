@@ -70,6 +70,7 @@ export interface OrderItemVariantBrief {
   id: number;
   size: string;
   color: string;
+  stock_quantity: number;
   product: OrderItemProductBrief | null;
 }
 
@@ -101,6 +102,7 @@ export interface Order {
   priority: string;
   deadline: string | null;
   notes: string | null;
+  stock_deducted: boolean;
   created_at: string;
   updated_at: string;
   items: OrderItem[];

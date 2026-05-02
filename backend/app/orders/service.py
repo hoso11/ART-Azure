@@ -1,5 +1,4 @@
 from datetime import datetime
-from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
@@ -9,13 +8,17 @@ from app.orders.models import Order, OrderItem, OrderStatus
 from app.exceptions import NotFoundException, ValidationException
 
 
-VALID_TRANSITIONS = {
-    OrderStatus.draft: [OrderStatus.confirmed, OrderStatus.cancelled],
-    OrderStatus.confirmed: [OrderStatus.in_production, OrderStatus.cancelled],
-    OrderStatus.in_production: [OrderStatus.completed, OrderStatus.cancelled],
-    OrderStatus.completed: [OrderStatus.shipped],
-    OrderStatus.shipped: [],
-    OrderStatus.cancelled: [],
+# Three active statuses. Admin can move freely between any two of these.
+# Old enum values (in_production, shipped, cancelled) remain in the Postgres
+# enum and the Python OrderStatus class so historical rows stay readable,
+# but they are not valid as a *target* of any new transition. Historical
+# orders stuck at a deprecated status can still be rescued by changing them
+# into one of the allowed statuses (source is unrestricted; only the target
+# is gated).
+ALLOWED_STATUSES: set[OrderStatus] = {
+    OrderStatus.draft,
+    OrderStatus.confirmed,
+    OrderStatus.completed,
 }
 
 
@@ -38,6 +41,7 @@ async def list_orders(
         count_query = count_query.where(Order.status == status)
 
     if filter == "active":
+        # Active = not yet completed and not in any terminal/deprecated state.
         active_statuses = [OrderStatus.confirmed, OrderStatus.in_production]
         query = query.where(Order.status.in_(active_statuses))
         count_query = count_query.where(Order.status.in_(active_statuses))
@@ -92,33 +96,44 @@ async def create_order(db: AsyncSession, customer_id: int, created_by: int, item
     return await get_order_by_id(db, order.id)
 
 
-async def _fulfill_order_items(
+async def _deduct_stock_on_completion(
     db: AsyncSession,
     order: Order,
     admin_user_id: int,
 ) -> None:
-    """Stock-first order fulfillment. For each item:
-    1. Use finished product stock first (locks variant rows).
-    2. Compute production_quantity = ordered - fulfilled_from_stock.
-    3. Validate raw materials only for production quantities.
-    4. Raise before touching anything if materials are short.
-    5. Deduct variant stock and raw materials atomically.
-    """
-    from app.products.models import ProductSizeMaterialRequirement, ProductVariant
-    from app.inventory.models import Inventory, Material
-    from app.inventory.service import create_stock_movement
+    """Deduct ProductVariant.stock_quantity for every order item.
 
-    # Step 1 — lock variant rows and compute per-item fulfillment plan.
+    Called at most once per order, when the order transitions to status
+    `completed`. Idempotency is enforced by the caller via the
+    `order.stock_deducted` flag.
+
+    Pre-flight check is all-or-nothing: if any item is short, raises
+    ValidationException(code='insufficient_stock') with a per-item shortage
+    list and no stock change is committed (the surrounding transaction
+    rolls back together with the status change).
+
+    Locks the variant rows with SELECT ... FOR UPDATE so two concurrent
+    completions of two orders that share a variant cannot over-deduct.
+
+    `damaged_stock_quantity` is never read or written by this function —
+    only sellable `stock_quantity` participates in availability checks.
+    """
+    from app.products.models import ProductVariant
+
+    if not order.items:
+        order.stock_deducted = True
+        await db.flush()
+        return
+
     variant_ids = [item.product_variant_id for item in order.items]
-    variant_result = await db.execute(
+    result = await db.execute(
         select(ProductVariant)
         .where(ProductVariant.id.in_(variant_ids))
         .with_for_update()
     )
-    variant_map: dict[int, ProductVariant] = {v.id: v for v in variant_result.scalars().all()}
+    variant_map: dict[int, ProductVariant] = {v.id: v for v in result.scalars().all()}
 
-    # fulfillment: list of (item, locked_variant, from_stock, to_produce)
-    fulfillment: list[tuple] = []
+    shortages: list[dict] = []
     for item in order.items:
         variant = variant_map.get(item.product_variant_id)
         if variant is None:
@@ -126,98 +141,45 @@ async def _fulfill_order_items(
                 detail=f"Product variant {item.product_variant_id} not found",
                 code="variant_not_found",
             )
-        from_stock = min(variant.stock_quantity, item.quantity)
-        to_produce = item.quantity - from_stock
-        fulfillment.append((item, variant, from_stock, to_produce))
+        if variant.stock_quantity < item.quantity:
+            shortages.append({
+                "product_variant_id": item.product_variant_id,
+                "size": variant.size,
+                "color": variant.color,
+                "required": item.quantity,
+                "available": variant.stock_quantity,
+                "missing": item.quantity - variant.stock_quantity,
+            })
 
-    # Step 2 — aggregate raw material requirements for production quantities only.
-    material_requirements: dict[int, Decimal] = {}
-    for item, variant, from_stock, to_produce in fulfillment:
-        if to_produce == 0:
-            continue  # fully fulfilled from finished stock — no raw materials needed
-
-        req_result = await db.execute(
-            select(ProductSizeMaterialRequirement).where(
-                ProductSizeMaterialRequirement.product_id == variant.product_id,
-                ProductSizeMaterialRequirement.size == variant.size,
-            )
-        )
-        requirements = req_result.scalars().all()
-
-        if not requirements:
-            raise ValidationException(
-                detail="Տվյալ ապրանքը արտադրելու համար համապատասխան նյութեր սահմանված չեն։",
-                code="no_material_requirements",
-            )
-
-        for req in requirements:
-            needed = req.quantity_per_item * to_produce  # only for the production portion
-            material_requirements[req.material_id] = (
-                material_requirements.get(req.material_id, Decimal("0")) + needed
-            )
-
-    # Step 3 — lock inventory rows and validate availability before touching anything.
-    if material_requirements:
-        inv_result = await db.execute(
-            select(Inventory)
-            .where(Inventory.material_id.in_(list(material_requirements.keys())))
-            .with_for_update()
-        )
-        inventory_map: dict[int, Inventory] = {
-            inv.material_id: inv for inv in inv_result.scalars().all()
-        }
-
-        shortages: list[tuple[int, Decimal, Decimal]] = []
-        for material_id, required in material_requirements.items():
-            inv = inventory_map.get(material_id)
-            available = inv.quantity_on_hand if inv else Decimal("0")
-            if available < required:
-                shortages.append((material_id, required, available))
-
-        if shortages:
-            mat_result = await db.execute(
-                select(Material).where(Material.id.in_([s[0] for s in shortages]))
-            )
-            mat_map = {m.id: m for m in mat_result.scalars().all()}
-            lines = []
-            for material_id, required, available in shortages:
-                mat = mat_map.get(material_id)
-                name = mat.name if mat else f"Material #{material_id}"
-                unit = mat.unit if mat else ""
-                lines.append(
-                    f"• {name}: required {required} {unit}, available {available} {unit}, "
-                    f"missing {required - available} {unit}"
-                )
-            raise ValidationException(
-                detail="Insufficient materials:\n" + "\n".join(lines),
-                code="insufficient_materials",
-            )
-
-    # Step 4 — all checks passed; deduct atomically.
-    for item, variant, from_stock, to_produce in fulfillment:
-        variant.stock_quantity -= from_stock
-        item.fulfilled_from_stock = from_stock
-        item.production_quantity = to_produce
-
-    for material_id, required in material_requirements.items():
-        await create_stock_movement(
-            db,
-            material_id,
-            -required,
-            "production_usage",
-            admin_user_id,
-            order_id=order.id,
+    if shortages:
+        lines = [
+            f"• {s['size']}/{s['color']}: required {s['required']}, "
+            f"available {s['available']}, missing {s['missing']}"
+            for s in shortages
+        ]
+        raise ValidationException(
+            detail="Insufficient stock:\n" + "\n".join(lines),
+            code="insufficient_stock",
         )
 
-    order.materials_deducted = True
+    for item in order.items:
+        variant = variant_map[item.product_variant_id]
+        variant.stock_quantity -= item.quantity
+
+    order.stock_deducted = True
+    logger.info(
+        "order.stock_deducted",
+        order_id=order.id,
+        admin_user_id=admin_user_id,
+        item_count=len(order.items),
+    )
     await db.flush()
 
 
 async def update_order(db: AsyncSession, order_id: int, admin_user_id: int | None = None, **kwargs) -> Order:
     order = await get_order_by_id(db, order_id)
 
-    transitioned_to_production = False
-    transitioned_to_confirmed = False
+    transitioned_to_completed = False
 
     if "status" in kwargs and kwargs["status"]:
         try:
@@ -227,17 +189,34 @@ async def update_order(db: AsyncSession, order_id: int, admin_user_id: int | Non
                 detail=f"Invalid status: {kwargs['status']}",
                 code="invalid_status",
             )
-        current_status = order.status
-        if new_status not in VALID_TRANSITIONS.get(current_status, []):
+
+        # Target must be one of the three allowed active statuses.
+        # The source is unrestricted: orders stuck at a deprecated status
+        # (in_production, shipped, cancelled) can still be rescued into the
+        # allowed set.
+        if new_status not in ALLOWED_STATUSES:
             raise ValidationException(
-                detail=f"Cannot transition from {current_status.value} to {new_status.value}",
-                code="invalid_status_transition",
+                detail=(
+                    f"Status '{new_status.value}' is no longer available. "
+                    f"Allowed: draft, confirmed, completed."
+                ),
+                code="status_not_allowed",
             )
-        logger.info("order.status_change", order_id=order_id, old=current_status.value, new=new_status.value)
-        if new_status == OrderStatus.in_production:
-            transitioned_to_production = True
-        if new_status == OrderStatus.confirmed:
-            transitioned_to_confirmed = True
+
+        current_status = order.status
+        if new_status == current_status:
+            # Same-status patch: no-op. Don't write the field, don't trigger
+            # the side-effect, don't emit an audit row from the caller.
+            kwargs.pop("status")
+        else:
+            logger.info(
+                "order.status_change",
+                order_id=order_id,
+                old=current_status.value,
+                new=new_status.value,
+            )
+            if new_status == OrderStatus.completed:
+                transitioned_to_completed = True
 
     for key, value in kwargs.items():
         if value is not None:
@@ -245,22 +224,16 @@ async def update_order(db: AsyncSession, order_id: int, admin_user_id: int | Non
 
     await db.flush()
 
-    # Side-effect: when an order enters production, seed the five default
-    # ProductionStage rows (idempotent — no-op if any already exist).
-    if transitioned_to_production:
-        from app.production.service import create_stages_for_order
-        await create_stages_for_order(db, order_id)
-
-    # Side-effect: draft → confirmed validates and deducts inventory materials.
-    # The entire block runs inside the same DB transaction; a ValidationException
-    # here triggers a rollback so the status change is also reverted.
-    if transitioned_to_confirmed and not order.materials_deducted:
+    # Side-effect: completion deducts finished stock once per order.
+    # Idempotent via order.stock_deducted: a second `-> completed` transition
+    # (e.g. completed -> draft -> completed) is a no-op.
+    if transitioned_to_completed and not order.stock_deducted:
         if admin_user_id is None:
             raise ValidationException(
-                detail="Admin user ID required for material deduction on confirm",
+                detail="Admin user ID required for stock deduction on completion",
                 code="admin_required",
             )
-        await _fulfill_order_items(db, order, admin_user_id)
+        await _deduct_stock_on_completion(db, order, admin_user_id)
 
     await db.refresh(order)
     return order

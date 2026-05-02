@@ -513,6 +513,14 @@ async def test_complete_with_damage_emits_single_audit_log(
     assert len(matches2) == 1, "second /complete must not emit a duplicate audit row"
 
 
+@pytest.mark.skip(
+    reason=(
+        "Order-based production removed in favor of 3-status order flow "
+        "(migration 011). The in_production transition is no longer a valid "
+        "target. Stock-based ProductionBatch flow (the rest of this file) "
+        "is unaffected and remains active."
+    )
+)
 @pytest.mark.asyncio
 async def test_order_based_production_still_works(
     client: AsyncClient, admin_user, customer, admin_cookies

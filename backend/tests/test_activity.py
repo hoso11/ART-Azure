@@ -295,27 +295,19 @@ async def test_user_delete_preserves_email_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_order_status_change_and_materials_deduction_one_row(
+async def test_order_status_change_and_stock_deduction_one_row(
     client: AsyncClient, db_session: AsyncSession,
     admin_user, customer, admin_cookies,
 ):
-    # Make a product+variant+material+requirement, then create+confirm an order.
+    """Confirming logs status_changed with stock_deducted=False (no side effect).
+    Completing logs a second status_changed row with stock_deducted=True and the
+    'Stock deducted on completion' details string."""
     p = await client.post("/api/v1/products", cookies=admin_cookies, json={
         "name": "P", "sku": "AUDIT-1",
-        "variants": [{"size": "M", "color": "Black", "price": 10}],
+        "variants": [{"size": "M", "color": "Black", "price": 10, "stock_quantity": 5}],
     })
     assert p.status_code == 201
-    pid = p.json()["id"]
     vid = p.json()["variants"][0]["id"]
-
-    m = await client.post("/api/v1/inventory/materials", cookies=admin_cookies, json={
-        "name": "Fabric", "sku": "AUD-MAT-1", "unit": "meters", "quantity_on_hand": 100,
-    })
-    mid = m.json()["id"]
-
-    await client.post(f"/api/v1/products/{pid}/size-requirements", cookies=admin_cookies, json={
-        "material_id": mid, "size": "M", "quantity_per_item": 2,
-    })
 
     o = await client.post("/api/v1/orders", cookies=admin_cookies, json={
         "customer_id": customer.id,
@@ -328,15 +320,25 @@ async def test_order_status_change_and_materials_deduction_one_row(
     assert len(created) == 1
     assert created[0].entity_id == oid
 
-    # Confirm → triggers material deduction. Expect ONE summary status_changed row.
+    # Confirm: no stock side-effect; one summary status_changed row.
     r = await client.patch(f"/api/v1/orders/{oid}", cookies=admin_cookies, json={"status": "confirmed"})
     assert r.status_code == 200
     status_rows = await _logs_with_action(db_session, "order.status_changed")
     assert len(status_rows) == 1
     assert status_rows[0].old_values == {"status": "draft"}
     assert status_rows[0].new_values["status"] == "confirmed"
-    assert status_rows[0].new_values["materials_deducted"] is True
-    assert status_rows[0].details == "Materials deducted on confirmation"
+    assert status_rows[0].new_values["stock_deducted"] is False
+    assert status_rows[0].details is None  # no side-effect on confirm
+
+    # Complete: deducts stock; second status_changed row with details set.
+    r = await client.patch(f"/api/v1/orders/{oid}", cookies=admin_cookies, json={"status": "completed"})
+    assert r.status_code == 200
+    status_rows = await _logs_with_action(db_session, "order.status_changed")
+    assert len(status_rows) == 2
+    assert status_rows[1].old_values == {"status": "confirmed"}
+    assert status_rows[1].new_values["status"] == "completed"
+    assert status_rows[1].new_values["stock_deducted"] is True
+    assert status_rows[1].details == "Stock deducted on completion"
 
 
 @pytest.mark.asyncio

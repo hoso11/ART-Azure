@@ -103,7 +103,12 @@ export default async function OrdersPage({
                       <td className="px-6 py-4 text-sm text-gray-600">{formatDate(order.created_at)}</td>
                       <td className="px-6 py-4 text-right">
                         {session.role === "admin" ? (
-                          <OrderRowActions orderId={order.id} currentStatus={order.status} />
+                          <OrderRowActions
+                            orderId={order.id}
+                            currentStatus={order.status}
+                            items={order.items}
+                            stockDeducted={order.stock_deducted}
+                          />
                         ) : (
                           <Link href={`/dashboard/orders/${order.id}`} className="text-brand-700 hover:underline text-sm">
                             Դիտել

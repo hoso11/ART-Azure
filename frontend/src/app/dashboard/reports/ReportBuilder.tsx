@@ -48,7 +48,10 @@ const DATE_PRESETS: { value: DatePreset; label: string }[] = [
 
 const DATE_FILTER_REPORTS = new Set<ReportType>(["orders", "sales", "material-consumption", "production"]);
 
-const ORDER_STATUSES = ["draft", "confirmed", "in_production", "completed", "shipped", "cancelled"];
+// Three active statuses only. Reports filter by these — historical orders
+// stuck at deprecated statuses are still readable, but not exposed as filter
+// options. See migration 011.
+const ORDER_STATUSES = ["draft", "confirmed", "completed"];
 const PRODUCTION_STAGES = ["cutting", "sewing", "quality_control", "packaging", "ready_for_shipment"];
 
 const COLUMNS: Record<ReportType, Col[]> = {

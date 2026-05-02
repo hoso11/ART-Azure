@@ -6,49 +6,66 @@ import { useRouter } from "next/navigation";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { showToast } from "@/lib/toast";
 
-const ALL_STATUSES = [
-  "draft",
-  "confirmed",
-  "in_production",
-  "completed",
-  "shipped",
-  "cancelled",
-] as const;
+// Three active statuses. Admin moves freely between any two of these.
+// Historical rows stuck at a deprecated status (in_production / shipped /
+// cancelled) render their badge via StatusBadge but the row dropdown only
+// offers the allowed targets, which lets admin rescue them into the active
+// set.
+const ALL_STATUSES = ["draft", "confirmed", "completed"] as const;
 
+// Active labels + read-only historical labels so a row stuck at a deprecated
+// status displays Armenian text in the dropdown's "current" option instead of
+// the raw enum value.
 const STATUS_LABELS: Record<string, string> = {
   draft: "Սևագիր",
   confirmed: "Հաստատված",
-  in_production: "Արտադրության մեջ",
   completed: "Ավարտված",
-  shipped: "Shipped",
+  in_production: "Արտադրության մեջ",
+  shipped: "Առաքված",
   cancelled: "Չեղարկված",
 };
 
-const TRANSITIONS: Record<string, string[]> = {
-  draft: ["confirmed", "cancelled"],
-  confirmed: ["in_production", "cancelled"],
-  in_production: ["completed", "cancelled"],
-  completed: [],
-  shipped: [],
-  cancelled: [],
+type RowItem = {
+  quantity: number;
+  product_variant: { stock_quantity: number } | null;
 };
 
 export function OrderRowActions({
   orderId,
   currentStatus,
+  items,
+  stockDeducted,
 }: {
   orderId: number;
   currentStatus: string;
+  items: RowItem[];
+  stockDeducted: boolean;
 }) {
   const router = useRouter();
   const [statusBusy, setStatusBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
 
-  const allowedNext = TRANSITIONS[currentStatus] || [];
+  // All allowed targets that aren't the current status. Source can be any
+  // value (including a deprecated one); only the target is gated.
+  const allowedNext = ALL_STATUSES.filter((s) => s !== currentStatus);
+
+  // Per-row stock check — backend remains source of truth, but we hide the
+  // `Ավարտված` option in the dropdown when stock is short and not yet
+  // deducted, so admin can't even pick it. If stock_deducted is already true,
+  // re-completing is a no-op and is allowed.
+  const anyShortage = items.some(
+    (i) => i.quantity > (i.product_variant?.stock_quantity ?? 0),
+  );
+  const blockComplete = anyShortage && !stockDeducted;
+  const blockReason = "Անբավարար մնացորդ — ավարտել հնարավոր չէ";
 
   const handleStatusChange = async (newStatus: string) => {
     if (!newStatus || newStatus === currentStatus) return;
+    if (newStatus === "completed" && blockComplete) {
+      showToast(blockReason, "error");
+      return;
+    }
     setStatusBusy(true);
     try {
       const res = await fetch(`/api/v1/orders/${orderId}/status`, {
@@ -97,18 +114,21 @@ export function OrderRowActions({
     <div className="flex items-center justify-end gap-3 whitespace-nowrap">
       <select
         value={currentStatus}
-        disabled={statusBusy || allowedNext.length === 0}
+        disabled={statusBusy}
         onChange={(e) => handleStatusChange(e.target.value)}
         className="text-xs rounded border border-gray-300 px-2 py-1 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 disabled:opacity-60 disabled:cursor-not-allowed"
-        title={allowedNext.length === 0 ? "Այս կարգավիճակից փոփոխություն անհնար է" : "Փոխել կարգավիճակը"}
+        title={blockComplete ? blockReason : "Փոխել կարգավիճակը"}
       >
-        {/* current is always selectable; only valid next states are enabled */}
         <option value={currentStatus}>{STATUS_LABELS[currentStatus] || currentStatus}</option>
-        {ALL_STATUSES.filter((s) => s !== currentStatus).map((s) => (
-          <option key={s} value={s} disabled={!allowedNext.includes(s)}>
-            → {STATUS_LABELS[s] || s}
-          </option>
-        ))}
+        {allowedNext.map((s) => {
+          const isComplete = s === "completed";
+          const disabled = isComplete && blockComplete;
+          return (
+            <option key={s} value={s} disabled={disabled}>
+              → {STATUS_LABELS[s]}{disabled ? " ✕" : ""}
+            </option>
+          );
+        })}
       </select>
 
       <Link

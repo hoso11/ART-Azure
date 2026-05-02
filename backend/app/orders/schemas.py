@@ -23,6 +23,7 @@ class OrderItemVariantBrief(BaseModel):
     id: int
     size: str
     color: str
+    stock_quantity: int = 0
     product: Optional[OrderItemProductBrief] = None
 
     model_config = {"from_attributes": True}
@@ -79,6 +80,7 @@ class OrderResponse(BaseModel):
     priority: str
     deadline: Optional[datetime] = None
     notes: Optional[str] = None
+    stock_deducted: bool = False
     created_at: datetime
     updated_at: datetime
     items: list[OrderItemResponse] = []

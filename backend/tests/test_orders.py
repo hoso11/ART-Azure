@@ -29,30 +29,16 @@ async def test_create_order(client: AsyncClient, admin_user, customer, admin_coo
 
 @pytest.mark.asyncio
 async def test_order_status_transition(client: AsyncClient, admin_user, customer, admin_cookies):
-    # Create product with variant size "S"
+    """3-status flow: admin can move freely between draft / confirmed / completed.
+    Confirming does not deduct stock; completion deducts stock with a per-variant
+    availability check; deprecated targets (in_production / shipped / cancelled)
+    are rejected with 422."""
     prod_resp = await client.post("/api/v1/products", json={
         "name": "Status Test Product",
         "sku": "TST-STS-001",
-        "variants": [{"size": "S", "color": "White", "price": 30.00}],
+        "variants": [{"size": "S", "color": "White", "price": 30.00, "stock_quantity": 5}],
     }, cookies=admin_cookies)
-    product_id = prod_resp.json()["id"]
     variant_id = prod_resp.json()["variants"][0]["id"]
-
-    # Create material with sufficient stock (draft→confirmed deducts materials)
-    mat_resp = await client.post("/api/v1/inventory/materials", json={
-        "name": "Test Fabric STS",
-        "sku": "MAT-STS-001",
-        "unit": "meters",
-        "quantity_on_hand": 100,
-    }, cookies=admin_cookies)
-    material_id = mat_resp.json()["id"]
-
-    # Add size material requirement: 2 meters per item, size "S"
-    await client.post(f"/api/v1/products/{product_id}/size-requirements", json={
-        "material_id": material_id,
-        "size": "S",
-        "quantity_per_item": 2,
-    }, cookies=admin_cookies)
 
     order_resp = await client.post("/api/v1/orders", json={
         "customer_id": customer.id,
@@ -60,18 +46,36 @@ async def test_order_status_transition(client: AsyncClient, admin_user, customer
     }, cookies=admin_cookies)
     order_id = order_resp.json()["id"]
 
-    # Valid transition: draft → confirmed (deducts 5 * 2 = 10 meters)
+    # draft → confirmed: no stock change.
     resp = await client.patch(f"/api/v1/orders/{order_id}", json={"status": "confirmed"}, cookies=admin_cookies)
     assert resp.status_code == 200
     assert resp.json()["status"] == "confirmed"
+    assert resp.json()["stock_deducted"] is False
 
-    # Valid transition: confirmed → in_production
+    # Deprecated target rejected: in_production.
     resp = await client.patch(f"/api/v1/orders/{order_id}", json={"status": "in_production"}, cookies=admin_cookies)
-    assert resp.status_code == 200
-
-    # Invalid transition: in_production → draft
-    resp = await client.patch(f"/api/v1/orders/{order_id}", json={"status": "draft"}, cookies=admin_cookies)
     assert resp.status_code == 422
+    assert resp.json()["code"] == "status_not_allowed"
+
+    # Deprecated target rejected: shipped.
+    resp = await client.patch(f"/api/v1/orders/{order_id}", json={"status": "shipped"}, cookies=admin_cookies)
+    assert resp.status_code == 422
+
+    # Deprecated target rejected: cancelled.
+    resp = await client.patch(f"/api/v1/orders/{order_id}", json={"status": "cancelled"}, cookies=admin_cookies)
+    assert resp.status_code == 422
+
+    # confirmed → draft: free move, no stock change.
+    resp = await client.patch(f"/api/v1/orders/{order_id}", json={"status": "draft"}, cookies=admin_cookies)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "draft"
+    assert resp.json()["stock_deducted"] is False
+
+    # draft → completed (skipping confirmed): allowed; deducts stock.
+    resp = await client.patch(f"/api/v1/orders/{order_id}", json={"status": "completed"}, cookies=admin_cookies)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "completed"
+    assert resp.json()["stock_deducted"] is True
 
 
 @pytest.mark.asyncio

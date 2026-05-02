@@ -8,24 +8,19 @@ import { FormField, Input, Select, Textarea } from "@/components/ui/FormField";
 import { Order } from "@/types";
 import { showToast } from "@/lib/toast";
 
-const ALL_STATUSES = ["draft", "confirmed", "in_production", "completed", "shipped", "cancelled"];
+// Three active statuses. Source can be any value (including a deprecated
+// historical status); targets are restricted to the three active ones.
+const ALL_STATUSES = ["draft", "confirmed", "completed"];
 
+// Active labels + read-only historical labels so a row stuck at a deprecated
+// status renders Armenian text in the "current" option.
 const STATUS_LABELS: Record<string, string> = {
   draft: "Սևագիր",
   confirmed: "Հաստատված",
-  in_production: "Արտադրության մեջ",
   completed: "Ավարտված",
-  shipped: "Shipped",
+  in_production: "Արտադրության մեջ",
+  shipped: "Առաքված",
   cancelled: "Չեղարկված",
-};
-
-const TRANSITIONS: Record<string, string[]> = {
-  draft: ["confirmed", "cancelled"],
-  confirmed: ["in_production", "cancelled"],
-  in_production: ["completed", "cancelled"],
-  completed: [],
-  shipped: [],
-  cancelled: [],
 };
 
 function toDateInputValue(iso: string | null): string {
@@ -47,8 +42,20 @@ export function OrderEditForm({ order }: { order: Order }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const allowedNext = TRANSITIONS[order.status] || [];
+  // Allowed targets = the three active statuses minus the current status.
+  // If the current status is one of the deprecated values, the dropdown lets
+  // admin rescue the order into any of the three.
+  const allowedNext = ALL_STATUSES.filter((s) => s !== order.status);
   const statusOptions = [order.status, ...allowedNext];
+
+  // Per-order stock check — disables the `completed` option when sellable
+  // stock is short and stock_deducted is still false. Backend remains the
+  // source of truth (422 insufficient_stock); this is a UX gate.
+  const anyShortage = order.items.some(
+    (i) => i.quantity > (i.product_variant?.stock_quantity ?? 0),
+  );
+  const blockComplete = anyShortage && !order.stock_deducted;
+  const blockReason = "Անբավարար մնացորդ — ավարտել հնարավոր չէ";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,6 +68,12 @@ export function OrderEditForm({ order }: { order: Order }) {
     }
     if (deadline && isNaN(new Date(deadline).getTime())) {
       setError("Անվավեր վերջնաժամկետ");
+      return;
+    }
+    // Block completed when stock is short and not yet deducted.
+    if (status === "completed" && status !== order.status && blockComplete) {
+      setError(blockReason);
+      showToast(blockReason, "error");
       return;
     }
 
@@ -117,18 +130,32 @@ export function OrderEditForm({ order }: { order: Order }) {
         <CardContent>
           <div className="grid grid-cols-2 gap-4">
             <FormField label="Կարգավիճակ" required>
-              <Select value={status} onChange={(e) => setStatus(e.target.value)} required>
-                {ALL_STATUSES.map((s) => (
-                  <option key={s} value={s} disabled={!statusOptions.includes(s)}>
-                    {STATUS_LABELS[s] || s}
-                    {s === order.status ? " (ընթացիկ)" : ""}
-                  </option>
-                ))}
+              <Select
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                required
+                title={blockComplete ? blockReason : undefined}
+              >
+                {/* Render current + allowed targets (deduplicated). When the
+                    order is on a deprecated status the current option still
+                    shows up first so admin can see what they're rescuing from.
+                    The `completed` option is disabled when stock is short
+                    and not yet deducted. */}
+                {Array.from(new Set(statusOptions)).map((s) => {
+                  const isComplete = s === "completed";
+                  const isCurrent = s === order.status;
+                  const disabled = isComplete && !isCurrent && blockComplete;
+                  return (
+                    <option key={s} value={s} disabled={disabled}>
+                      {STATUS_LABELS[s] || s}
+                      {isCurrent ? " (ընթացիկ)" : ""}
+                      {disabled ? " ✕" : ""}
+                    </option>
+                  );
+                })}
               </Select>
-              {allowedNext.length === 0 && (
-                <p className="text-xs text-gray-500 mt-1">
-                  Այս կարգավիճակից փոփոխություն հնարավոր չէ
-                </p>
+              {blockComplete && (
+                <p className="text-xs text-red-600 mt-1">{blockReason}</p>
               )}
             </FormField>
 

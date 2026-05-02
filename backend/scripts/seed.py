@@ -231,12 +231,16 @@ def seed():
 
         # ── Orders ──
         now = datetime.utcnow()
+        # Seed only the 3 active statuses (draft / confirmed / completed). The
+        # historical in_production / shipped / cancelled values still exist in
+        # the enum so older DBs remain readable, but they're no longer used by
+        # the application flow — see migration 011 + handoff/CURRENT_STATE.md.
         orders_data = [
-            (customers[0].id, admin.id, OrderStatus.in_production, OrderPriority.high, now + timedelta(days=14), "Bulk order — 500 oxford shirts"),
+            (customers[0].id, admin.id, OrderStatus.confirmed, OrderPriority.high, now + timedelta(days=14), "Bulk order — 500 oxford shirts"),
             (customers[1].id, admin.id, OrderStatus.confirmed, OrderPriority.normal, now + timedelta(days=21), "Spring collection chinos"),
             (customers[2].id, admin.id, OrderStatus.draft, OrderPriority.urgent, now + timedelta(days=7), "Corporate uniform rush order"),
             (customers[0].id, admin.id, OrderStatus.completed, OrderPriority.normal, now - timedelta(days=5), "Repeat order — blazers"),
-            (customers[3].id, admin.id, OrderStatus.in_production, OrderPriority.normal, now + timedelta(days=30), "European distribution batch"),
+            (customers[3].id, admin.id, OrderStatus.confirmed, OrderPriority.normal, now + timedelta(days=30), "European distribution batch"),
             (customers[4].id, admin.id, OrderStatus.confirmed, OrderPriority.low, now + timedelta(days=45), "Sample order for new client"),
         ]
 

@@ -37,6 +37,20 @@ export default async function OrderDetailPage({
 
   const total = order.items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
 
+  // Per-item stock availability — used to render the availability columns and
+  // to gate the `Ավարտված` (completed) button. Backend remains the source of
+  // truth; this is purely a UX hint.
+  const showAvailability = order.status === "confirmed" || order.status === "completed";
+  const itemAvailability = order.items.map((i) => {
+    const stock = i.product_variant?.stock_quantity ?? 0;
+    const missing = Math.max(0, i.quantity - stock);
+    return { item_id: i.id, stock, missing, sufficient: missing === 0 };
+  });
+  const anyShortage = itemAvailability.some((a) => !a.sufficient);
+  const blockCompleteReason = anyShortage
+    ? "Անբավարար մնացորդ — ավարտել հնարավոր չէ"
+    : undefined;
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
@@ -62,10 +76,10 @@ export default async function OrderDetailPage({
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Տարբերակ</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Պատվիրված</th>
-                    {order.status !== "draft" && (
+                    {showAvailability && (
                       <>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Պահուստից</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Արտ․</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Մնացորդ</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Կարգավիճակ</th>
                       </>
                     )}
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Միավորի գին</th>
@@ -73,9 +87,10 @@ export default async function OrderDetailPage({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {order.items.map((item) => {
+                  {order.items.map((item, idx) => {
                     const variant = item.product_variant;
                     const productName = variant?.product?.name ?? `Տարբերակ #${item.product_variant_id}`;
+                    const avail = itemAvailability[idx];
                     return (
                     <tr key={item.id}>
                       <td className="px-6 py-4 text-sm">
@@ -87,10 +102,20 @@ export default async function OrderDetailPage({
                         )}
                       </td>
                       <td className="px-6 py-4 text-sm">{formatNumber(item.quantity)}</td>
-                      {order.status !== "draft" && (
+                      {showAvailability && (
                         <>
-                          <td className="px-6 py-4 text-sm text-green-700 font-medium">{formatNumber(item.fulfilled_from_stock)}</td>
-                          <td className="px-6 py-4 text-sm text-orange-600 font-medium">{formatNumber(item.production_quantity)}</td>
+                          <td className={`px-6 py-4 text-sm font-medium ${avail.sufficient ? "text-gray-900" : "text-red-700"}`}>
+                            {formatNumber(avail.stock)}
+                          </td>
+                          <td className="px-6 py-4 text-sm">
+                            {avail.sufficient ? (
+                              <span className="text-xs font-semibold text-green-700">Բավարար</span>
+                            ) : (
+                              <span className="text-xs font-semibold text-red-700">
+                                Բացակայում է {formatNumber(avail.missing)}
+                              </span>
+                            )}
+                          </td>
                         </>
                       )}
                       <td className="px-6 py-4 text-sm">{formatCurrency(item.unit_price)}</td>
@@ -101,7 +126,7 @@ export default async function OrderDetailPage({
                 </tbody>
                 <tfoot className="bg-gray-50">
                   <tr>
-                    <td colSpan={order.status !== "draft" ? 5 : 3} className="px-6 py-3 text-right text-sm font-semibold">Ընդհանուր</td>
+                    <td colSpan={showAvailability ? 5 : 3} className="px-6 py-3 text-right text-sm font-semibold">Ընդհանուր</td>
                     <td className="px-6 py-3 text-sm font-bold">{formatCurrency(total)}</td>
                   </tr>
                 </tfoot>
@@ -145,7 +170,12 @@ export default async function OrderDetailPage({
                   <dd>
                     <StatusBadge status={order.status} />
                     {session.role === "admin" && (
-                      <OrderStatusChange orderId={order.id} currentStatus={order.status} />
+                      <OrderStatusChange
+                        orderId={order.id}
+                        currentStatus={order.status}
+                        blockComplete={anyShortage && !order.stock_deducted}
+                        blockCompleteReason={blockCompleteReason}
+                      />
                     )}
                   </dd>
                 </div>

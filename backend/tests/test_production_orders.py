@@ -1,4 +1,18 @@
-"""Order-based production: one row per order via aggregation, free transitions, audit.
+"""SKIPPED — order-based production was removed in favor of the 3-status order flow.
+
+Migration 011 + service rewrite simplified orders to draft / confirmed / completed
+and dropped the in_production transition. Order-based ProductionStage rows are no
+longer created for new orders, so every test in this file (each one calls
+`confirmed -> in_production`) now 422s with code='status_not_allowed'.
+
+The order-based ProductionStage code path remains in `backend/app/production/`
+for any historical rows still in the DB; the tests are kept here (not deleted)
+in case the workflow is revived. Re-enable by removing the module-level skip.
+
+Original docstring follows.
+====================================================================
+
+Order-based production: one row per order via aggregation, free transitions, audit.
 
 Covers:
   1. Existing 5-row seed unchanged.
@@ -22,6 +36,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.production.models import (
     ProductionStage, ProductionLog, StageName, StageStatus, ProductionBatch,
+)
+
+pytestmark = pytest.mark.skip(
+    reason=(
+        "Order-based production removed in favor of 3-status order flow. "
+        "All tests here transition to in_production, which the new service "
+        "rejects with code='status_not_allowed'. See migration 011."
+    )
 )
 from app.activity.models import ActivityLog
 

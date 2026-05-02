@@ -19,7 +19,7 @@ def _order_snapshot(o: Order) -> dict:
         "status": o.status.value if hasattr(o.status, "value") else o.status,
         "priority": o.priority.value if hasattr(o.priority, "value") else o.priority,
         "deadline": o.deadline.isoformat() if o.deadline else None,
-        "materials_deducted": o.materials_deducted,
+        "stock_deducted": o.stock_deducted,
     }
 
 
@@ -125,24 +125,24 @@ async def update_order(
 ):
     existing = await service.get_order_by_id(db, order_id)
     old_snapshot = _order_snapshot(existing)
-    old_materials_deducted = existing.materials_deducted
+    old_stock_deducted = existing.stock_deducted
 
     order = await service.update_order(db, order_id, admin_user_id=current_admin.id, **data.model_dump(exclude_unset=True))
     new_snapshot = _order_snapshot(order)
 
     if old_snapshot["status"] != new_snapshot["status"]:
         # Status change → one summary audit row that also captures whether
-        # the materials-deduction side effect ran on this transition.
+        # the stock-deduction side effect ran on this transition.
         details = None
-        if not old_materials_deducted and order.materials_deducted:
-            details = "Materials deducted on confirmation"
+        if not old_stock_deducted and order.stock_deducted:
+            details = "Stock deducted on completion"
         await activity_service.log_activity(
             db, user=current_admin, request=request,
             action="order.status_changed", entity_type="order", entity_id=order.id,
             old_values={"status": old_snapshot["status"]},
             new_values={
                 "status": new_snapshot["status"],
-                "materials_deducted": order.materials_deducted,
+                "stock_deducted": order.stock_deducted,
             },
             details=details,
         )
@@ -165,20 +165,20 @@ async def update_order_status(
 ):
     existing = await service.get_order_by_id(db, order_id)
     old_status = existing.status.value if hasattr(existing.status, "value") else existing.status
-    old_materials_deducted = existing.materials_deducted
+    old_stock_deducted = existing.stock_deducted
 
     order = await service.update_order(db, order_id, admin_user_id=current_admin.id, status=data.status)
     new_status = order.status.value if hasattr(order.status, "value") else order.status
 
     if old_status != new_status:
         details = None
-        if not old_materials_deducted and order.materials_deducted:
-            details = "Materials deducted on confirmation"
+        if not old_stock_deducted and order.stock_deducted:
+            details = "Stock deducted on completion"
         await activity_service.log_activity(
             db, user=current_admin, request=request,
             action="order.status_changed", entity_type="order", entity_id=order.id,
             old_values={"status": old_status},
-            new_values={"status": new_status, "materials_deducted": order.materials_deducted},
+            new_values={"status": new_status, "stock_deducted": order.stock_deducted},
             details=details,
         )
     return schemas.OrderResponse.model_validate(order)
