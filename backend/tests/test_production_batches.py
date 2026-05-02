@@ -1,20 +1,28 @@
 """
 Stock-based production batch tests (production-for-stock).
 
+Each call to /complete is a DELTA, not a final total. Cumulative counters
+live on the batch row; the batch flips to stage_status='completed' /
+stock_added=True only when cumulative good + damaged == quantity_to_produce.
+
 Cases:
-  1. Enough materials                 → batch created (201), materials deducted
-  2. Not enough materials             → 422, materials unchanged
-  3. Complete all-good                → sellable stock += quantity, damaged unchanged
-  4. Complete idempotent              → second /complete is a no-op (no double increment)
-  5. Missing material requirements    → 422 with code="no_material_requirements"
-  6. Order-based production           → still works (smoke: confirm + in_production)
-  7. Partial complete (good+damaged)  → both counters increment correctly
-  8. All damaged                      → damaged += quantity, sellable unchanged
-  9. Sum != quantity_to_produce       → 422 with code="invalid_quantities"
- 10. Negative good_quantity           → 422 with code="invalid_quantities"
- 11. Negative damaged_quantity        → 422 with code="invalid_quantities"
- 12. Materials stay deducted on any   → reject path (all-damaged) does NOT refund
- 13. Single audit log on completion   → exactly one production.batch_completed
+  1.  Enough materials                  → batch created (201), materials deducted
+  2.  Not enough materials              → 422, materials unchanged
+  3.  Single delta == quantity          → all-good completes the batch in one shot
+  4.  Terminal idempotency              → call after stock_added=True is no-op
+  5.  Missing material requirements     → 422 with code="no_material_requirements"
+  6.  Order-based production            → skipped (3-status flow, see migration 011)
+  7.  Single delta good+damaged         → split sum equals quantity completes batch
+  8.  All damaged in one delta          → damaged += quantity, sellable unchanged
+  9.  Partial delta accepted            → cumulative updates, status stays in_progress
+ 10.  Negative good_quantity            → 422 with code="invalid_quantities"
+ 11.  Negative damaged_quantity         → 422 with code="invalid_quantities"
+ 12.  Partial save keeps materials      → materials stay deducted across deltas
+ 13.  Audit log split                   → progress rows for partials, one completed row
+ 14.  Multiple partials reach completion → cumulative stock movement matches deltas
+ 15.  Delta exceeds remaining           → 422 delta_exceeds_remaining, no movement
+ 16.  Empty delta (0+0)                 → 422 empty_delta, no movement
+ 17.  Partial save promotes pending     → first delta on pending → in_progress
 """
 from decimal import Decimal
 
@@ -208,11 +216,12 @@ async def test_complete_all_good_increases_sellable_stock_only(
 
 
 @pytest.mark.asyncio
-async def test_complete_idempotent_no_double_increment(
+async def test_terminal_idempotency_after_completion(
     client: AsyncClient, admin_user, customer, admin_cookies
 ):
-    """Case 4: a second /complete on an already-completed batch is a silent
-    no-op — neither sellable nor damaged stock moves a second time."""
+    """Case 4: once cumulative reaches quantity_to_produce and stock_added=True,
+    any further /complete call is a silent no-op — neither sellable nor damaged
+    stock moves a second time and the cumulative split stays as recorded."""
     product_id, variant_id = await _make_product(
         client, admin_cookies, sku="PB-DBL-001", size="S", color="Pink", stock_quantity=2
     )
@@ -226,19 +235,20 @@ async def test_complete_idempotent_no_double_increment(
     )
     batch_id = create.json()["id"]
 
+    # First delta fills the batch in one shot (3 + 2 = 5 = quantity).
     first = await _complete_batch(client, admin_cookies, batch_id, good=3, damaged=2, reason="QC tears")
     assert first.status_code == 200, first.text
+    assert first.json()["stock_added"] is True
     sellable_after_first = await _variant_stock(client, admin_cookies, product_id, variant_id)
     damaged_after_first = await _variant_damaged_stock(client, admin_cookies, product_id, variant_id)
-    assert sellable_after_first == 2 + 3  # initial 2 + produced 3 good
+    assert sellable_after_first == 2 + 3  # initial 2 + 3 good delta
     assert damaged_after_first == 2
 
-    # Second call — different quantities should NOT take effect.
-    second = await _complete_batch(client, admin_cookies, batch_id, good=5, damaged=0)
+    # Second call after stock_added=True — silent no-op even with non-zero deltas.
+    second = await _complete_batch(client, admin_cookies, batch_id, good=1, damaged=0)
     assert second.status_code == 200
     body = second.json()
     assert body["stock_added"] is True
-    # The original split is preserved.
     assert body["good_quantity"] == 3
     assert body["damaged_quantity"] == 2
 
@@ -347,15 +357,15 @@ async def test_complete_all_damaged_does_not_increase_sellable_stock(
 
 
 @pytest.mark.asyncio
-async def test_sum_not_equal_quantity_to_produce_rejected(
+async def test_partial_progress_accepted_stays_in_progress(
     client: AsyncClient, admin_user, customer, admin_cookies
 ):
-    """Case 9: sum != quantity_to_produce → 422 with code=invalid_quantities,
-    no counters move. Tests both shrinkage (3+2 < 7) and overshoot (5+5 > 7)."""
+    """Case 9: a partial delta (cumulative < quantity) is accepted, batch
+    stays in_progress / stock_added=False. Variant counters move by the delta."""
     product_id, variant_id = await _make_product(
-        client, admin_cookies, sku="PB-SUM-001", size="M", color="Yellow"
+        client, admin_cookies, sku="PB-PRG-001", size="M", color="Yellow", stock_quantity=1
     )
-    material_id = await _make_material(client, admin_cookies, sku="MAT-SUM-001", qty=100)
+    material_id = await _make_material(client, admin_cookies, sku="MAT-PRG-001", qty=100)
     await _add_size_requirement(
         client, admin_cookies, product_id=product_id, material_id=material_id, size="M", qty_per_item=1
     )
@@ -368,19 +378,177 @@ async def test_sum_not_equal_quantity_to_produce_rejected(
     sellable_before = await _variant_stock(client, admin_cookies, product_id, variant_id)
     damaged_before = await _variant_damaged_stock(client, admin_cookies, product_id, variant_id)
 
-    # Shrinkage attempt: 3 + 2 = 5 < 7 → rejected.
-    short = await _complete_batch(client, admin_cookies, batch_id, good=3, damaged=2)
-    assert short.status_code == 422
-    assert short.json().get("code") == "invalid_quantities"
+    # 3 + 2 = 5 < 7 → accepted, batch stays in_progress.
+    resp = await _complete_batch(client, admin_cookies, batch_id, good=3, damaged=2, reason="QC")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["good_quantity"] == 3
+    assert body["damaged_quantity"] == 2
+    assert body["stage_status"] == "in_progress"
+    assert body["stock_added"] is False
+    assert body["completed_at"] is None
 
-    # Overshoot attempt: 5 + 5 = 10 > 7 → rejected.
-    over = await _complete_batch(client, admin_cookies, batch_id, good=5, damaged=5)
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == sellable_before + 3
+    assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == damaged_before + 2
+
+
+@pytest.mark.asyncio
+async def test_delta_exceeds_remaining_rejected(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Case 15: a delta whose sum would push cumulative past quantity_to_produce
+    is rejected with code=delta_exceeds_remaining. No counter moves."""
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="PB-OVR-001", size="M", color="Yellow"
+    )
+    material_id = await _make_material(client, admin_cookies, sku="MAT-OVR-001", qty=100)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=material_id, size="M", qty_per_item=1
+    )
+
+    create = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=7
+    )
+    batch_id = create.json()["id"]
+
+    # First, a clean partial that uses 4 of the 7.
+    first = await _complete_batch(client, admin_cookies, batch_id, good=3, damaged=1)
+    assert first.status_code == 200
+    sellable_after_first = await _variant_stock(client, admin_cookies, product_id, variant_id)
+    damaged_after_first = await _variant_damaged_stock(client, admin_cookies, product_id, variant_id)
+
+    # Remaining is now 3. Attempt to add 4 more → must reject.
+    over = await _complete_batch(client, admin_cookies, batch_id, good=2, damaged=2)
     assert over.status_code == 422
-    assert over.json().get("code") == "invalid_quantities"
+    assert over.json().get("code") == "delta_exceeds_remaining"
 
-    # Counters unchanged.
+    # Direct overshoot from a clean batch (10 > 7) on a fresh batch.
+    fresh_create = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=7
+    )
+    fresh_id = fresh_create.json()["id"]
+    direct = await _complete_batch(client, admin_cookies, fresh_id, good=5, damaged=5)
+    assert direct.status_code == 422
+    assert direct.json().get("code") == "delta_exceeds_remaining"
+
+    # Counters from the rejected attempts must be unchanged.
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == sellable_after_first
+    assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == damaged_after_first
+
+
+@pytest.mark.asyncio
+async def test_empty_delta_rejected(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Case 16: good=0 and damaged=0 → 422 with code=empty_delta. No movement."""
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="PB-EMP-001", size="M", color="Lavender"
+    )
+    material_id = await _make_material(client, admin_cookies, sku="MAT-EMP-001", qty=100)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=material_id, size="M", qty_per_item=1
+    )
+
+    create = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=4
+    )
+    batch_id = create.json()["id"]
+
+    sellable_before = await _variant_stock(client, admin_cookies, product_id, variant_id)
+    damaged_before = await _variant_damaged_stock(client, admin_cookies, product_id, variant_id)
+
+    resp = await _complete_batch(client, admin_cookies, batch_id, good=0, damaged=0)
+    assert resp.status_code == 422
+    assert resp.json().get("code") == "empty_delta"
+
     assert await _variant_stock(client, admin_cookies, product_id, variant_id) == sellable_before
     assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == damaged_before
+
+
+@pytest.mark.asyncio
+async def test_multiple_partials_reach_completion(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Case 14: several partial deltas sum to quantity_to_produce. After the
+    delta that fills the batch, stage_status='completed' and stock_added=True.
+    Variant stock movement equals the cumulative deltas — no extra, no missing."""
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="PB-MUL-001", size="L", color="Kanach", stock_quantity=2
+    )
+    material_id = await _make_material(client, admin_cookies, sku="MAT-MUL-001", qty=100)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=material_id, size="L", qty_per_item=1
+    )
+
+    create = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=10
+    )
+    batch_id = create.json()["id"]
+
+    # Partial 1: +5 good, +0 damaged. Cumulative 5/0, remaining 5, in_progress.
+    r1 = await _complete_batch(client, admin_cookies, batch_id, good=5, damaged=0)
+    assert r1.status_code == 200, r1.text
+    b1 = r1.json()
+    assert b1["good_quantity"] == 5
+    assert b1["damaged_quantity"] == 0
+    assert b1["stage_status"] == "in_progress"
+    assert b1["stock_added"] is False
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == 2 + 5
+    assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == 0
+
+    # Partial 2: +3 good, +1 damaged. Cumulative 8/1, remaining 1, still in_progress.
+    r2 = await _complete_batch(client, admin_cookies, batch_id, good=3, damaged=1, reason="seam slip")
+    assert r2.status_code == 200, r2.text
+    b2 = r2.json()
+    assert b2["good_quantity"] == 8
+    assert b2["damaged_quantity"] == 1
+    assert b2["stage_status"] == "in_progress"
+    assert b2["stock_added"] is False
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == 2 + 5 + 3
+    assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == 1
+
+    # Partial 3: +1 good, +0 damaged. Cumulative 9/1 = 10 = quantity → completed.
+    r3 = await _complete_batch(client, admin_cookies, batch_id, good=1, damaged=0)
+    assert r3.status_code == 200, r3.text
+    b3 = r3.json()
+    assert b3["good_quantity"] == 9
+    assert b3["damaged_quantity"] == 1
+    assert b3["stage_status"] == "completed"
+    assert b3["stock_added"] is True
+    assert b3["current_stage"] == "ready_for_shipment"
+    assert b3["completed_at"] is not None
+    # Final stock movement: +9 sellable, +1 damaged across the three deltas.
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == 2 + 9
+    assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_save_promotes_pending_to_in_progress(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Case 17: a fresh batch starts at stage_status='pending'. The first
+    non-final partial delta auto-promotes it to 'in_progress' without needing
+    a separate PATCH /production/batches/{id} call."""
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="PB-PND-001", size="M", color="Cream"
+    )
+    material_id = await _make_material(client, admin_cookies, sku="MAT-PND-001", qty=100)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=material_id, size="M", qty_per_item=1
+    )
+
+    create = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=6
+    )
+    batch_id = create.json()["id"]
+    assert create.json()["stage_status"] == "pending"
+
+    resp = await _complete_batch(client, admin_cookies, batch_id, good=2, damaged=0)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["stage_status"] == "in_progress"
+    assert body["stock_added"] is False
+    assert body["good_quantity"] == 2
 
 
 @pytest.mark.asyncio
@@ -511,6 +679,77 @@ async def test_complete_with_damage_emits_single_audit_log(
         if r["entity_type"] == "production_batch" and r["entity_id"] == batch_id
     ]
     assert len(matches2) == 1, "second /complete must not emit a duplicate audit row"
+
+
+@pytest.mark.asyncio
+async def test_partial_saves_emit_progress_then_completed_audit_logs(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Case 13b: across multiple partials, intermediate saves emit
+    `production.batch_progress` audit rows; the delta that fills the batch
+    emits exactly one `production.batch_completed`. A subsequent no-op call
+    after stock_added=True writes no further audit row."""
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="PB-AUD2-001", size="M", color="Slate"
+    )
+    material_id = await _make_material(client, admin_cookies, sku="MAT-AUD2-001", qty=100)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=material_id, size="M", qty_per_item=1
+    )
+
+    create = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=5
+    )
+    batch_id = create.json()["id"]
+
+    # Two non-final partials, then a completing delta.
+    p1 = await _complete_batch(client, admin_cookies, batch_id, good=2, damaged=0)
+    assert p1.status_code == 200
+    p2 = await _complete_batch(client, admin_cookies, batch_id, good=1, damaged=1, reason="loose seam")
+    assert p2.status_code == 200
+    p3 = await _complete_batch(client, admin_cookies, batch_id, good=1, damaged=0)
+    assert p3.status_code == 200
+    assert p3.json()["stock_added"] is True
+
+    progress_logs = await client.get(
+        "/api/v1/activity-logs?action=production.batch_progress&limit=100",
+        cookies=admin_cookies,
+    )
+    progress_rows = [
+        r for r in progress_logs.json()["items"]
+        if r["entity_type"] == "production_batch" and r["entity_id"] == batch_id
+    ]
+    assert len(progress_rows) == 2
+
+    completed_logs = await client.get(
+        "/api/v1/activity-logs?action=production.batch_completed&limit=100",
+        cookies=admin_cookies,
+    )
+    completed_rows = [
+        r for r in completed_logs.json()["items"]
+        if r["entity_type"] == "production_batch" and r["entity_id"] == batch_id
+    ]
+    assert len(completed_rows) == 1
+
+    # Idempotent terminal call must not write any new audit row.
+    after = await _complete_batch(client, admin_cookies, batch_id, good=1, damaged=0)
+    assert after.status_code == 200
+    progress_logs2 = await client.get(
+        "/api/v1/activity-logs?action=production.batch_progress&limit=100",
+        cookies=admin_cookies,
+    )
+    completed_logs2 = await client.get(
+        "/api/v1/activity-logs?action=production.batch_completed&limit=100",
+        cookies=admin_cookies,
+    )
+    assert len([
+        r for r in progress_logs2.json()["items"]
+        if r["entity_type"] == "production_batch" and r["entity_id"] == batch_id
+    ]) == 2
+    assert len([
+        r for r in completed_logs2.json()["items"]
+        if r["entity_type"] == "production_batch" and r["entity_id"] == batch_id
+    ]) == 1
 
 
 @pytest.mark.skip(

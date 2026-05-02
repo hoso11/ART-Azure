@@ -589,21 +589,39 @@ async def complete_production_batch(
     good_quantity: int,
     damaged_quantity: int,
     defect_reason: str | None = None,
-) -> tuple[ProductionBatch, bool]:
-    """Finalize a stock-based batch with a partial outcome.
+) -> tuple[ProductionBatch, bool, bool, int, int]:
+    """Apply a partial-progress delta to a stock-based batch.
 
-    - good_quantity goes to variant.stock_quantity (sellable).
-    - damaged_quantity goes to variant.damaged_stock_quantity (Խոտան).
-    - Materials stay deducted in all cases.
-    - Idempotent: second call returns the batch unchanged. The bool flag tells
-      the router whether this was the real completion (True) or a no-op
-      (False), so audit logs aren't duplicated.
-    - Validates good >= 0, damaged >= 0, good + damaged == quantity_to_produce.
-      Implicit shrinkage is NOT allowed (admin must enter exact split).
+    Each call ADDS the given good/damaged delta to the running cumulative
+    counters. variant.stock_quantity (sellable) and
+    variant.damaged_stock_quantity (Խոտան) move by the delta. Materials stay
+    deducted; this function never refunds.
+
+    The batch flips to stage_status='completed' / stock_added=True only when
+    cumulative good + damaged equals quantity_to_produce. Until then,
+    stage_status is auto-promoted from 'pending' to 'in_progress' on the
+    first non-zero delta.
+
+    Idempotent at the *terminal* state: once stock_added=True, any subsequent
+    call is a silent no-op (the second tuple element is False, the third is
+    True).
+
+    Returns:
+        (batch, changed, completed, delta_good_applied, delta_damaged_applied)
+
+        changed   — True if anything moved; False on the terminal no-op path.
+        completed — True if the batch is now (or already was) fully done.
+        delta_*   — the deltas the caller actually contributed (0/0 on no-op).
+
+    Raises ValidationException with codes:
+        invalid_quantities       — negative delta on either side.
+        empty_delta              — delta_good == delta_damaged == 0.
+        delta_exceeds_remaining  — delta would push cumulative past
+                                   quantity_to_produce.
     """
     from app.products.models import ProductVariant
 
-    # Validate quantities BEFORE locking anything.
+    # Validate deltas BEFORE locking anything.
     if good_quantity < 0:
         raise ValidationException(
             detail="Լավ քանակը չի կարող բացասական լինել",
@@ -613,6 +631,11 @@ async def complete_production_batch(
         raise ValidationException(
             detail="Խոտանի քանակը չի կարող բացասական լինել",
             code="invalid_quantities",
+        )
+    if good_quantity == 0 and damaged_quantity == 0:
+        raise ValidationException(
+            detail="Լավ և Խոտան քանակները չեն կարող երկուսն էլ զրո լինել",
+            code="empty_delta",
         )
 
     # Lock the batch row.
@@ -624,16 +647,19 @@ async def complete_production_batch(
         raise NotFoundException(detail=f"Production batch {batch_id} not found")
 
     if batch.stock_added:
-        # Already completed — return unchanged. Idempotent by design.
-        return batch, False
+        # Terminal state — silent no-op for caller idempotency. Caller skips
+        # the audit log on (changed=False, completed=True).
+        return batch, False, True, 0, 0
 
-    if good_quantity + damaged_quantity != batch.quantity_to_produce:
+    remaining = batch.quantity_to_produce - batch.good_quantity - batch.damaged_quantity
+    delta_total = good_quantity + damaged_quantity
+    if delta_total > remaining:
         raise ValidationException(
             detail=(
-                f"Լավ + Խոտան = {good_quantity + damaged_quantity}, "
-                f"բայց արտադրության քանակը {batch.quantity_to_produce} է"
+                f"Մուտքագրված քանակը ({delta_total}) գերազանցում է "
+                f"մնացածը ({remaining})"
             ),
-            code="invalid_quantities",
+            code="delta_exceeds_remaining",
         )
 
     # Lock the variant row and add both counters atomically.
@@ -649,23 +675,34 @@ async def complete_production_batch(
     variant.stock_quantity += good_quantity
     variant.damaged_stock_quantity += damaged_quantity
 
-    batch.good_quantity = good_quantity
-    batch.damaged_quantity = damaged_quantity
-    batch.defect_reason = defect_reason if damaged_quantity > 0 else None
-    batch.stage_status = "completed"
-    batch.current_stage = "ready_for_shipment"
-    batch.completed_at = datetime.utcnow()
-    batch.stock_added = True
+    batch.good_quantity += good_quantity
+    batch.damaged_quantity += damaged_quantity
+    if damaged_quantity > 0 and defect_reason:
+        batch.defect_reason = defect_reason
+
+    new_total = batch.good_quantity + batch.damaged_quantity
+    is_now_complete = new_total == batch.quantity_to_produce
+
+    if is_now_complete:
+        batch.stage_status = "completed"
+        batch.current_stage = "ready_for_shipment"
+        batch.completed_at = datetime.utcnow()
+        batch.stock_added = True
+    elif batch.stage_status == "pending":
+        batch.stage_status = "in_progress"
 
     await db.flush()
     await db.refresh(batch)
     logger.info(
-        "production.batch_completed",
+        "production.batch_progress" if not is_now_complete else "production.batch_completed",
         batch_id=batch.id,
         variant_id=batch.variant_id,
-        good=good_quantity,
-        damaged=damaged_quantity,
+        delta_good=good_quantity,
+        delta_damaged=damaged_quantity,
+        cumulative_good=batch.good_quantity,
+        cumulative_damaged=batch.damaged_quantity,
+        remaining=batch.quantity_to_produce - new_total,
         new_variant_stock=variant.stock_quantity,
         new_variant_damaged_stock=variant.damaged_stock_quantity,
     )
-    return batch, True
+    return batch, True, is_now_complete, good_quantity, damaged_quantity

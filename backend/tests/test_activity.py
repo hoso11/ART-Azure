@@ -384,8 +384,14 @@ async def test_batch_create_and_complete_audited_idempotent(
 
     completed_rows = await _logs_with_action(db_session, "production.batch_completed")
     assert len(completed_rows) == 1
-    assert completed_rows[0].new_values["good_quantity"] == 4
-    assert completed_rows[0].new_values["damaged_quantity"] == 0
+    # New delta contract: each save audits the delta + the cumulative totals.
+    # A single-shot completion has delta == cumulative == quantity_to_produce.
+    assert completed_rows[0].new_values["delta_good"] == 4
+    assert completed_rows[0].new_values["delta_damaged"] == 0
+    assert completed_rows[0].new_values["cumulative_good"] == 4
+    assert completed_rows[0].new_values["cumulative_damaged"] == 0
+    assert completed_rows[0].new_values["remaining"] == 0
+    assert completed_rows[0].new_values["stock_added"] is True
 
 
 @pytest.mark.asyncio

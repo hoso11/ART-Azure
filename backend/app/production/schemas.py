@@ -79,11 +79,14 @@ class ProductionBatchUpdate(BaseModel):
 
 
 class BatchCompleteRequest(BaseModel):
-    """Finalize a stock-based batch with a partial outcome.
-    Service enforces:
+    """Apply a partial-progress delta to a stock-based batch.
+
+    good_quantity and damaged_quantity are DELTAS for this save (not totals);
+    the batch row holds running cumulative counters. The service enforces:
       - good_quantity >= 0
       - damaged_quantity >= 0
-      - good_quantity + damaged_quantity == quantity_to_produce
+      - good_quantity + damaged_quantity > 0  (empty_delta otherwise)
+      - good_quantity + damaged_quantity <= remaining
     """
     good_quantity: int
     damaged_quantity: int

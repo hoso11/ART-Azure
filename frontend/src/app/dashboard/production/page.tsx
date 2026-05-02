@@ -152,8 +152,11 @@ export default async function ProductionPage({
                   </td>
                   <td className="px-6 py-4 text-sm font-medium">
                     {formatNumber(b.quantity_to_produce)}
-                    {b.stock_added && (
-                      <div className="mt-1 text-xs flex items-center gap-2">
+                    {/* Show running cumulative whenever any quantity has been processed,
+                        not only after final completion. While in progress, also display
+                        the remaining count so admins can plan the next partial save. */}
+                    {(b.good_quantity > 0 || b.damaged_quantity > 0) && (
+                      <div className="mt-1 text-xs flex items-center gap-2 flex-wrap">
                         <span className="text-green-700">Լավ՝ {formatNumber(b.good_quantity)}</span>
                         {b.damaged_quantity > 0 && (
                           <span
@@ -161,6 +164,11 @@ export default async function ProductionPage({
                             title={b.defect_reason || undefined}
                           >
                             Խոտան՝ {formatNumber(b.damaged_quantity)}
+                          </span>
+                        )}
+                        {!b.stock_added && (
+                          <span className="text-gray-500">
+                            Մնացած՝ {formatNumber(b.quantity_to_produce - b.good_quantity - b.damaged_quantity)}
                           </span>
                         )}
                       </div>
@@ -180,6 +188,8 @@ export default async function ProductionPage({
                       currentStatus={b.stage_status}
                       stockAdded={b.stock_added}
                       quantityToProduce={b.quantity_to_produce}
+                      goodSoFar={b.good_quantity}
+                      damagedSoFar={b.damaged_quantity}
                     />
                   </td>
                 </tr>

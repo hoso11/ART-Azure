@@ -147,35 +147,59 @@ async def complete_production_batch(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    """Finalize a stock-based batch with a partial outcome.
+    """Apply a partial-progress delta to a stock-based batch.
+
     Body: {good_quantity, damaged_quantity, defect_reason?}.
-    Sum must equal quantity_to_produce — implicit shrinkage is rejected.
-    Idempotent: second call is a silent no-op (no duplicate audit row).
+
+    The two quantities are DELTAS (units to add now), not final totals.
+    Cumulative counters live on the batch row and accumulate across calls
+    until cumulative good + damaged == quantity_to_produce, at which point
+    the batch flips to completed.
+
+    Each non-final delta emits a `production.batch_progress` audit row;
+    the delta that fills the batch emits `production.batch_completed`.
+    A request submitted after the batch is already completed is a silent
+    no-op with no audit row.
     """
-    batch, changed = await service.complete_production_batch(
+    batch, changed, completed, delta_good, delta_damaged = await service.complete_production_batch(
         db, batch_id,
         good_quantity=data.good_quantity,
         damaged_quantity=data.damaged_quantity,
         defect_reason=data.defect_reason,
     )
     if changed:
-        details = (
-            f"Completed batch #{batch.id}: "
-            f"+{batch.good_quantity} good, +{batch.damaged_quantity} Խոտան "
-            f"to variant #{batch.variant_id}"
-        )
-        if batch.damaged_quantity > 0 and batch.defect_reason:
+        remaining_after = batch.quantity_to_produce - batch.good_quantity - batch.damaged_quantity
+        if completed:
+            action = "production.batch_completed"
+            details = (
+                f"Completed batch #{batch.id}: "
+                f"+{delta_good} good, +{delta_damaged} Խոտան "
+                f"to variant #{batch.variant_id} "
+                f"(cumulative {batch.good_quantity}/{batch.damaged_quantity})"
+            )
+        else:
+            action = "production.batch_progress"
+            details = (
+                f"Progress batch #{batch.id}: "
+                f"+{delta_good} good, +{delta_damaged} Խոտան "
+                f"(cumulative {batch.good_quantity}/{batch.damaged_quantity}, "
+                f"մնացած {remaining_after})"
+            )
+        if delta_damaged > 0 and batch.defect_reason:
             details += f" — {batch.defect_reason}"
         await activity_service.log_activity(
             db, user=admin, request=request,
-            action="production.batch_completed",
+            action=action,
             entity_type="production_batch",
             entity_id=batch.id,
             new_values={
-                "good_quantity": batch.good_quantity,
-                "damaged_quantity": batch.damaged_quantity,
+                "delta_good": delta_good,
+                "delta_damaged": delta_damaged,
+                "cumulative_good": batch.good_quantity,
+                "cumulative_damaged": batch.damaged_quantity,
+                "remaining": remaining_after,
                 "variant_id": batch.variant_id,
-                "stock_added": True,
+                "stock_added": batch.stock_added,
             },
             details=details,
         )
