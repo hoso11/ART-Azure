@@ -103,16 +103,42 @@ async def get_sales_report(
     request: Request,
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
+    customer_id: int | None = Query(None),
+    order_id: int | None = Query(None),
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    data = await service.get_sales_report(db, start_date, end_date)
+    """Sales / revenue report.
+
+    Optional `customer_id` scopes the report (and CSV) to one customer; the
+    response then includes a `selected_customer` block and `order_items` rows,
+    and the CSV filename becomes
+    `customer-report-<slug>-<YYYY-MM-DD>.csv`. Adding `order_id` further
+    scopes to a single order belonging to that customer; the filename then
+    becomes `customer-report-<slug>-order-<id>-<YYYY-MM-DD>.csv` and the
+    response carries a `selected_order` block. `order_id` without
+    `customer_id` returns 422.
+    """
+    from datetime import date
+    data = await service.get_sales_report(db, start_date, end_date, customer_id, order_id)
     await _audit_report(db, admin, request, "sales", format, {
         "start_date": start_date, "end_date": end_date,
+        "customer_id": customer_id, "order_id": order_id,
     })
     if format == "csv":
-        return _csv_response(service.sales_report_to_csv(data), "sales_report.csv")
+        if customer_id is not None and data.get("selected_customer"):
+            slug = service.customer_filename_slug(
+                data["selected_customer"]["name"], customer_id
+            )
+            today_iso = date.today().isoformat()
+            if order_id is not None and data.get("selected_order"):
+                filename = f"customer-report-{slug}-order-{order_id}-{today_iso}.csv"
+            else:
+                filename = f"customer-report-{slug}-{today_iso}.csv"
+        else:
+            filename = "sales_report.csv"
+        return _csv_response(service.sales_report_to_csv(data), filename)
     return data
 
 

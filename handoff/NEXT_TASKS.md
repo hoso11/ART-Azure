@@ -41,6 +41,66 @@ State of each in-flight workstream. "Done" means landed in the current commit on
 - Migration `007_production_batches`.
 - Tests in `backend/tests/test_production_batches.py` cover the deduction-once and stock-once invariants.
 
+## Done (deployed v34 / v31, this commit)
+
+### Sales report — per-customer + per-order filtering and export
+
+`GET /api/v1/reports/sales` now accepts:
+
+- `customer_id` *(optional)* — scopes the report to one customer. Response carries a `selected_customer` block and a per-OrderItem `order_items` list (revenue-eligible orders only). 404 `customer_not_found` if missing.
+- `order_id` *(optional, requires `customer_id`)* — scopes the report further to one order belonging to that customer. Response carries a `selected_order` block (`{id, order_date, status}`).
+  - `order_id` without `customer_id` → **422 `order_id_requires_customer_id`**.
+  - `order_id` for a missing order → **404 `order_not_found`**.
+  - `order_id` for an order belonging to a different customer → **422 `order_not_for_customer`**.
+
+`format=csv` filename derived from the filter combination:
+
+| Filters | Filename |
+|---|---|
+| (none) | `sales_report.csv` |
+| `customer_id` | `customer-report-<slug>-<YYYY-MM-DD>.csv` |
+| `customer_id` + `order_id` | `customer-report-<slug>-order-<id>-<YYYY-MM-DD>.csv` |
+
+`<slug>` is computed by `service.customer_filename_slug(name, customer_id)` — lowercased, ASCII-only `[a-z0-9-_]`; spaces become `-`; non-ASCII (incl. Armenian) is dropped; falls back to `customer-{id}` when the cleaned slug is empty.
+
+Frontend (`frontend/src/app/dashboard/reports/ReportBuilder.tsx`):
+
+- Customer dropdown is shown for the `orders` and `sales` reports (`CUSTOMER_FILTER_REPORTS` set).
+- For `sales` only, an additional **Պատվեր** dropdown appears once a customer has been selected *and* a customer-scoped report has been generated. Options come from the response's `order_items` (unique `(order_id, order_date)` pairs, sorted by id desc). The dropdown stays populated across order-filtered regenerations so the user can switch between orders without re-fetching the customer list.
+- Switching customer or report type clears both `orderFilter` and `customerOrders`.
+- The selected-customer header card now shows a sub-line "Ընտրված պատվեր: #N · YYYY-MM-DD · status" when an order is selected.
+
+Audit log: `report.generated` / `report.exported` rows now include `order_id` in `new_values.filters` for sales-report calls.
+
+Tests: `backend/tests/test_reports_sales.py` — 11 cases (6 from the previous customer-only task + 5 new for `order_id`: customer+order returns only that order, CSV filename includes `-order-<id>-`, missing customer_id → 422, ownership mismatch → 422, missing order_id → 404).
+
+No DB migration. Alembic head remains `011_order_stock_deducted`.
+
+#### Rollback (per-customer + per-order export → previous live)
+
+The previous live tags are still in the registry; rollback is a one-step Terraform apply.
+
+1. Edit `terraform/envs/dev/terraform.tfvars`:
+   ```
+   backend_image_tag  = "v33"
+   frontend_image_tag = "v30"
+   ```
+2. From `terraform/envs/dev/`:
+   ```bash
+   source .env.terraform
+   terraform plan -out=tfplan
+   ```
+   Expected plan: **0 to add, 3 to change, 0 to destroy** — `azapi_resource.backend_main`, `azapi_resource.backend_worker[0]`, `azurerm_linux_web_app.frontend` revert to v33 / v30. Verify the plan shows **no** changes to the four protected data resources (PostgreSQL server / database, Storage Account / container) or the two `azurerm_management_lock` resources.
+3. `terraform apply tfplan` (~40–80 s).
+4. Smoke check:
+   ```bash
+   curl -sS -o /dev/null -w "%{http_code}\n" "$(terraform output -raw frontend_url)/"
+   curl -sS -o /dev/null -w "%{http_code}\n" "$(terraform output -raw backend_url)/ready"
+   terraform output | grep -E "deployed_image|backend_image"  # → v30 / v33
+   ```
+
+**No DB rollback needed** — this task added no migration. Cookies issued by v34 are still valid against v33 (same `backend_secret_key`). v33 backend ignores any leftover `order_id` query string from a stale v31 frontend page; v30 frontend won't render the order dropdown so the parameter is never sent.
+
 ## Done (in working tree, not yet committed)
 
 ### Phase 1 — Stock-based production: partial outcome (Խոտան)

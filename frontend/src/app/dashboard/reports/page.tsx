@@ -12,8 +12,8 @@ export default async function ReportsPage() {
   const [stats, trends, customersData, materialsData] = await Promise.all([
     serverGet<DashboardStats>("/reports/dashboard"),
     serverGet<OrderTrend[]>("/reports/order-trends?days=90"),
-    serverGet<PaginatedResponse<Customer>>("/customers?limit=200"),
-    serverGet<PaginatedResponse<Material>>("/inventory/materials?limit=200"),
+    serverGet<PaginatedResponse<Customer>>("/customers?limit=100"),
+    serverGet<PaginatedResponse<Material>>("/inventory/materials?limit=100"),
   ]);
 
   const customers = customersData?.items ?? [];

@@ -7,9 +7,9 @@ Snapshot as of the most recent verified working tree on `v12`. Future agents: co
 | Component | State | Live value |
 |---|---|---|
 | Resource group | applied | `rg-art-dev` (West Europe) |
-| Frontend Web App | applied, serving | `app-art-frontend-dev-art4242` on `asp-art-dev` (F1 Free) — image `hoso30/art-frontend:v24` |
-| Backend Web App | applied, serving | `app-art-backend-dev-art4242` on `asp-art-backend-dev` (F1 Free) — image `hoso30/art-backend:v30`. **System-Assigned identity** (Task C2a) — principal_id `8b108e0c-10af-4d3d-9a34-5f372f684064`. |
-| Backend `worker` sidecar | applied | image `hoso30/art-backend:v30`, running Celery worker + beat |
+| Frontend Web App | applied, serving | `app-art-frontend-dev-art4242` on `asp-art-dev` (F1 Free) — image `hoso30/art-frontend:v31` |
+| Backend Web App | applied, serving | `app-art-backend-dev-art4242` on `asp-art-backend-dev` (F1 Free) — image `hoso30/art-backend:v34`. **System-Assigned identity** (Task C2a) — principal_id `8b108e0c-10af-4d3d-9a34-5f372f684064`. |
+| Backend `worker` sidecar | applied | image `hoso30/art-backend:v34`, running Celery worker + beat |
 | Backend `redis` sidecar | applied | `redis:7-alpine`, internal-only |
 | Backend `minio` sidecar | disabled | `minio_sidecar_enabled = false` since Phase 4. Sitecontainer resource still exists in `main.tf` for parity. **Never enable in Azure** — MinIO is local-dev-only. |
 | PostgreSQL Flexible Server | applied, serving | `psql-art-dev-art4242` (B_Standard_B1ms, PG 16, 32 GB, 7-day backup, **North Europe** — see PostgreSQL exception in CLAUDE.md). **Two roles in use** (Task C1): `art_admin` for Alembic + bootstrap, `art_app` (least-privilege CRUD only) for application runtime. |
@@ -27,8 +27,8 @@ Verify image tags after any apply:
 cd terraform/envs/dev
 source .env.terraform
 terraform output | grep -E "deployed_image|backend_image"
-# deployed_image = "hoso30/art-frontend:v24"
-# backend_image  = "hoso30/art-backend:v30"
+# deployed_image = "hoso30/art-frontend:v31"
+# backend_image  = "hoso30/art-backend:v34"
 ```
 
 Verify the live security stack:
@@ -136,6 +136,7 @@ Designed to recover databases stamped at a now-deleted revision (e.g. `005_produ
 | Homepage hardcoded translations removed | done in `ef49b8d` | `frontend/src/components/home/FeaturedProducts.tsx` |
 | **Stock-based production: partial outcome (Խոտան)** | **done in working tree, migration `010`** | `backend/app/production/{models,schemas,service,router}.py`, `backend/app/products/{models,schemas}.py`, `BatchControl.tsx`, `frontend/src/app/dashboard/production/page.tsx`, `VariantActions.tsx`, `frontend/src/app/dashboard/products/[id]/page.tsx` |
 | **Damaged-stock report (Խոտանի հաշվետվություն)** | **done in working tree** | `backend/app/reports/{service,router}.py`, `frontend/src/app/dashboard/reports/ReportBuilder.tsx`, `backend/tests/test_reports_damaged_stock.py` |
+| **Sales report — per-customer + per-order export** | done, deployed v34 / v31 | `backend/app/reports/{service,router}.py`, `frontend/src/app/dashboard/reports/ReportBuilder.tsx`, `backend/tests/test_reports_sales.py`. `/reports/sales` accepts optional `customer_id` and (only when `customer_id` is set) optional `order_id`. Response carries `selected_customer` and `selected_order` blocks plus a per-line `order_items` list. CSV filename is `sales_report.csv` (unfiltered), `customer-report-<slug>-<YYYY-MM-DD>.csv` (customer-only), or `customer-report-<slug>-order-<id>-<YYYY-MM-DD>.csv` (customer + order). Error codes: `customer_not_found` (404), `order_id_requires_customer_id` (422), `order_not_found` (404), `order_not_for_customer` (422). No DB migration. Frontend: customer dropdown for orders/sales reports; order dropdown appears for sales after a customer is selected and a customer-scoped report has been generated (options derived from the response's `order_items`). |
 
 ## Partial-outcome (Խոտան) semantics — load-bearing
 

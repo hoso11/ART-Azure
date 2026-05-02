@@ -80,12 +80,21 @@ Image tag history (relevant):
 | `art-backend:v27` | **Forbidden** | Missing XFF port-strip; Azure App Service prepended ephemeral source ports to each XFF entry, so every request landed in a fresh rate-limit bucket. |
 | `art-backend:v28` | Retired | Task B — auth-surface hardening (slowapi 5/min login, OriginCheckMiddleware, non-root container). |
 | `art-backend:v29` | Retired | Task C1 — least-privilege Postgres runtime user `art_app` via `scripts/bootstrap_db_user.py`. |
-| `art-backend:v30` | **Live** | Task C2a/C2b — Azure Blob via Managed Identity. Adapter constructs `BlobServiceClient(account_url, DefaultAzureCredential())` when `AZURE_STORAGE_ACCOUNT_URL` is set; falls back to connection string only if it isn't (no longer used in Azure). Adds `azure-identity==1.19.0` dep. |
+| `art-backend:v30` | Retired | Task C2a/C2b — Azure Blob via Managed Identity. Adapter constructs `BlobServiceClient(account_url, DefaultAzureCredential())` when `AZURE_STORAGE_ACCOUNT_URL` is set; falls back to connection string only if it isn't (no longer used in Azure). Adds `azure-identity==1.19.0` dep. |
+| `art-backend:v31` | Retired | Orders list dropdown enforces stock-aware status options (no `Ավարտված` selectable when stock is short). |
+| `art-backend:v32` | Retired | Stock-based production batches accept partial completion: `/complete` is now a delta over the cumulative `good_quantity` / `damaged_quantity`; emits `production.batch_progress` on partials, `production.batch_completed` on the final delta. |
+| `art-backend:v33` | Retired | Sales report accepts optional `customer_id`; response gains `selected_customer` block and per-customer `order_items` list; CSV filename becomes `customer-report-<slug>-<YYYY-MM-DD>.csv` when filtered. |
+| `art-backend:v34` | **Live** | Sales report adds optional `order_id` (requires `customer_id`); response gains `selected_order` block; CSV filename becomes `customer-report-<slug>-order-<id>-<YYYY-MM-DD>.csv` when both filters are set. New error codes: `order_id_requires_customer_id` (422), `order_not_found` (404), `order_not_for_customer` (422). No DB migration. |
 | `art-frontend:v20` | Retired | Last working pre-gallery frontend. |
 | `art-frontend:v21` | **Forbidden** | Built from `frontend/Dockerfile` (dev mode `npm run dev`); crashed at runtime in Azure with PostCSS / Tailwind error. |
 | `art-frontend:v22` | **Forbidden** | Production build, but MSYS-mangled `NEXT_PUBLIC_API_URL` poisoned every client-side fetch. |
 | `art-frontend:v23` | **Forbidden** | Same MSYS poisoning as v22 plus the v23 modal defensive logic. |
-| `art-frontend:v24` | **Live** | Built with `MSYS_NO_PATHCONV=1`. Clean `/api/v1` base URL. Ships defensive modal logic from v23. |
+| `art-frontend:v24` | Retired | Built with `MSYS_NO_PATHCONV=1`. Clean `/api/v1` base URL. Ships defensive modal logic from v23. |
+| `art-frontend:v25`–`v27` | Retired | Orders list / detail UX: stock-aware status dropdown, friendlier shortage messaging (paired with backend v31). |
+| `art-frontend:v28` | Retired | Production page: per-batch delta inputs (Լավ + Խոտան), running cumulative + remaining display, "Բոլոր մնացածը …" shortcuts (paired with backend v32). |
+| `art-frontend:v29` | Retired | Reports page: per-customer sales report — customer dropdown, "Ընտրված հաճախորդ" header, "Order Items" table (paired with backend v33). |
+| `art-frontend:v30` | Retired | Reports page bug fix — customer / material dropdowns now request `?limit=100` (the backend's declared cap) instead of `?limit=200` which was silently failing 422 and leaving both dropdowns empty. |
+| `art-frontend:v31` | **Live** | Reports page: per-order sales report — second dropdown ("Պատվեր") appears after a customer is selected and a customer-scoped report has been generated, populated from the response's `order_items`. Selecting an order re-generates the report scoped to that order; "Բոլոր պատվերները" returns to all-orders view. |
 
 Blacklisted in `terraform/envs/dev/variables.tf` validation:
 - Frontend: `v13`, `v21`, `v22`, `v23`.
@@ -157,7 +166,7 @@ grep -ci "Module parse failed\|Failed to compile" /tmp/fe.html  # must be 0
 # Backend (must return JSON)
 curl -i "$(terraform output -raw backend_url)/api/v1/products/public?limit=8" | head -5
 
-# Verify the deployed v24 chunk has no MSYS-poisoned URL
+# Verify the deployed frontend chunk has no MSYS-poisoned URL
 CHUNK=$(curl -s "$(terraform output -raw frontend_url)/dashboard/production" \
   | grep -oE '/_next/static/chunks/app/dashboard/production/page-[a-f0-9]+\.js' | head -1)
 curl -s "$(terraform output -raw frontend_url)$CHUNK" | grep -c "C:/Program Files/Git"
@@ -303,7 +312,7 @@ After the 12-month window expires, B1MS bills ~$15/month and 32 GB SSD bills ~$3
 
 ## Verifying confirmed-working features
 
-Each feature below is part of the live deployment as of v24 (frontend) / v30 (backend):
+Each feature below is part of the live deployment as of v31 (frontend) / v34 (backend):
 
 | Feature | Manual check |
 |---|---|
@@ -314,6 +323,22 @@ Each feature below is part of the live deployment as of v24 (frontend) / v30 (ba
 | Production modal product dropdown | `/dashboard/production` → "Ստեղծել արտադրություն" → "Ապրանք *" populates with all products |
 | Image upload to Azure Blob | Admin: `/dashboard/products/<id>` → upload a JPG/PNG/WebP → see it appear in the gallery; HEAD request to `/api/v1/products/images/file/<key>` returns `image/*` |
 | Audit log | `/dashboard/activity` shows recent mutations with Armenian action labels |
+| Sales report — all customers | `/dashboard/reports` → "Վաճառքների հաշվետվություն" → leave customer empty → "Ստեղծել Հաշվետվություն" → summary cards reflect every revenue-eligible order. CSV downloads as `sales_report.csv`. |
+| Sales report — one customer | Same page, pick a customer, generate. Header shows "Ընտրված հաճախորդ"; summary, by-day, by-customer, and Order Items table all scope to that customer. CSV downloads as `customer-report-<slug>-<YYYY-MM-DD>.csv`. |
+| Sales report — one customer + one order | After generating a customer-scoped report, the "Պատվեր" dropdown appears, populated from the response's `order_items`. Pick an order, regenerate. Header shows "Ընտրված պատվեր: #N"; every section scopes to that single order. CSV downloads as `customer-report-<slug>-order-<id>-<YYYY-MM-DD>.csv`. |
+
+### Sales report API — error contract
+
+`GET /api/v1/reports/sales` accepts these query combinations:
+
+| Query | Status | Notes |
+|---|---|---|
+| (no filters) | 200 | All revenue-eligible orders. `selected_customer = null`, `selected_order = null`, `order_items = []`. |
+| `customer_id=N` | 200 | Scoped to customer N. `selected_customer` populated, `order_items` populated. 404 `customer_not_found` if N doesn't exist. |
+| `customer_id=N&order_id=M` | 200 | Scoped to order M (must belong to customer N). `selected_order` populated. |
+| `order_id=M` (no `customer_id`) | **422** `order_id_requires_customer_id` | Order filter is only meaningful in the per-customer flow. |
+| `customer_id=N&order_id=M` (M missing) | **404** `order_not_found` | |
+| `customer_id=N&order_id=M` (M belongs to L≠N) | **422** `order_not_for_customer` | Ownership mismatch. |
 
 ## Known limitations (current state, not bugs)
 

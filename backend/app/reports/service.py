@@ -184,16 +184,92 @@ async def get_sales_report(
     db: AsyncSession,
     start_date: str | None = None,
     end_date: str | None = None,
+    customer_id: int | None = None,
+    order_id: int | None = None,
 ) -> dict:
+    """Sales / revenue summary.
+
+    When `customer_id` is provided, the report is scoped to a single customer:
+    summary, by_day, and by_customer all reflect only that customer's orders,
+    and the response also carries `selected_customer` metadata plus a
+    per-OrderItem `order_items` list for the filtered, revenue-eligible
+    orders. The customer must exist (404 otherwise).
+
+    `order_id` further narrows the report to a single order belonging to
+    `customer_id`. It is invalid without `customer_id` (422
+    `order_id_requires_customer_id`); 404 `order_not_found` if missing; 422
+    `order_not_for_customer` if it belongs to a different customer. The
+    response then carries a `selected_order` block.
+
+    When `customer_id` is None, behavior is preserved bit-for-bit:
+    `selected_customer` is None and `order_items` is an empty list, so the
+    CSV writer's new sections produce no output.
+    """
+    from app.customers.models import Customer
+    from app.exceptions import NotFoundException
+
+    if order_id is not None and customer_id is None:
+        raise ValidationException(
+            detail="order_id requires customer_id",
+            code="order_id_requires_customer_id",
+        )
+
     start, end = _parse_dates(start_date, end_date)
+
+    selected_customer: dict | None = None
+    if customer_id is not None:
+        cust_result = await db.execute(
+            select(Customer).where(Customer.id == customer_id)
+        )
+        customer_row = cust_result.scalar_one_or_none()
+        if customer_row is None:
+            raise NotFoundException(
+                detail=f"Customer {customer_id} not found",
+                code="customer_not_found",
+            )
+        selected_customer = {
+            "id": customer_row.id,
+            "name": customer_row.name,
+            "company_name": customer_row.company_name,
+        }
+
+    selected_order: dict | None = None
+    if order_id is not None:
+        order_lookup = await db.execute(
+            select(Order).where(Order.id == order_id)
+        )
+        order_row = order_lookup.scalar_one_or_none()
+        if order_row is None:
+            raise NotFoundException(
+                detail=f"Order {order_id} not found",
+                code="order_not_found",
+            )
+        if order_row.customer_id != customer_id:
+            raise ValidationException(
+                detail=f"Order {order_id} does not belong to customer {customer_id}",
+                code="order_not_for_customer",
+            )
+        selected_order = {
+            "id": order_row.id,
+            "order_date": order_row.created_at.date().isoformat(),
+            "status": order_row.status.value,
+        }
+
     query = (
         select(Order)
-        .options(selectinload(Order.items), selectinload(Order.customer))
+        .options(
+            selectinload(Order.items).selectinload(OrderItem.product_variant),
+            selectinload(Order.customer),
+        )
     )
     if start:
         query = query.where(Order.created_at >= start)
     if end:
         query = query.where(Order.created_at <= end)
+    if customer_id is not None:
+        query = query.where(Order.customer_id == customer_id)
+    if order_id is not None:
+        query = query.where(Order.id == order_id)
 
     result = await db.execute(query)
     orders = result.scalars().unique().all()
@@ -208,6 +284,26 @@ async def get_sales_report(
     total_revenue = Decimal("0")
     by_day: dict[str, dict] = {}
     by_customer: dict[int, dict] = {}
+    order_items: list[dict] = []
+
+    # Resolve product names for items in revenue-eligible orders only when
+    # we're going to include them (i.e. customer_id is set). Single batched
+    # fetch; avoids N+1 lazy loads on ProductVariant.product.
+    if customer_id is not None:
+        from app.products.models import Product
+        product_ids = {
+            item.product_variant.product_id
+            for o in orders if o.status in revenue_statuses
+            for item in o.items if item.product_variant is not None
+        }
+        product_map: dict[int, Product] = {}
+        if product_ids:
+            prod_result = await db.execute(
+                select(Product).where(Product.id.in_(product_ids))
+            )
+            product_map = {p.id: p for p in prod_result.scalars().all()}
+    else:
+        product_map = {}
 
     for o in orders:
         order_total = sum(Decimal(str(i.unit_price)) * i.quantity for i in o.items)
@@ -230,7 +326,27 @@ async def get_sales_report(
         by_customer[cid]["orders"] += 1
         by_customer[cid]["revenue"] += order_total
 
+        if customer_id is not None:
+            for item in o.items:
+                variant = item.product_variant
+                product = product_map.get(variant.product_id) if variant else None
+                unit_price = Decimal(str(item.unit_price))
+                line_total = unit_price * item.quantity
+                order_items.append({
+                    "order_id": o.id,
+                    "order_date": o.created_at.date().isoformat(),
+                    "product_name": product.name if product else "",
+                    "sku": product.sku if product else "",
+                    "size": variant.size if variant else "",
+                    "color": variant.color if variant else "",
+                    "quantity": item.quantity,
+                    "unit_price": float(unit_price),
+                    "total_price": float(line_total),
+                })
+
     return {
+        "selected_customer": selected_customer,
+        "selected_order": selected_order,
         "summary": {
             "total_orders": len(orders),
             "confirmed_orders": confirmed_count,
@@ -250,12 +366,57 @@ async def get_sales_report(
             }
             for v in sorted(by_customer.values(), key=lambda x: -float(x["revenue"]))
         ],
+        "order_items": order_items,
     }
+
+
+_SLUG_KEEP = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def customer_filename_slug(name: str | None, customer_id: int) -> str:
+    """ASCII-safe slug for use in Content-Disposition filenames.
+
+    Preserves lowercase letters, digits, dash, underscore. Spaces become
+    dashes. Non-ASCII characters (incl. Armenian) are dropped. If the
+    cleaned slug is empty, falls back to ``customer-{id}``.
+    """
+    if not name:
+        return f"customer-{customer_id}"
+    lowered = name.strip().lower().replace(" ", "-")
+    cleaned = "".join(ch for ch in lowered if ch in _SLUG_KEEP)
+    # Collapse repeated dashes, strip leading/trailing dashes.
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    cleaned = cleaned.strip("-_")
+    return cleaned or f"customer-{customer_id}"
 
 
 def sales_report_to_csv(data: dict) -> str:
     output = io.StringIO()
     writer = csv.writer(output)
+
+    selected = data.get("selected_customer")
+    if selected:
+        writer.writerow(["Selected Customer"])
+        writer.writerow(["Customer", "Company", "ID"])
+        writer.writerow([
+            selected["name"],
+            selected.get("company_name") or "",
+            selected["id"],
+        ])
+        writer.writerow([])
+
+    selected_o = data.get("selected_order")
+    if selected_o:
+        writer.writerow(["Selected Order"])
+        writer.writerow(["Order ID", "Order Date", "Status"])
+        writer.writerow([
+            selected_o["id"],
+            selected_o["order_date"],
+            selected_o["status"],
+        ])
+        writer.writerow([])
+
     s = data["summary"]
     writer.writerow(["Sales Report Summary"])
     writer.writerow(["Total Orders", s["total_orders"]])
@@ -270,6 +431,21 @@ def sales_report_to_csv(data: dict) -> str:
     writer.writerow(["Customer", "Company", "Orders", "Revenue"])
     for row in data["by_customer"]:
         writer.writerow([row["customer_name"], row["company_name"] or "", row["orders"], row["revenue"]])
+
+    items = data.get("order_items") or []
+    if items:
+        writer.writerow([])
+        writer.writerow(["Order Items"])
+        writer.writerow([
+            "Order ID", "Order Date", "Product", "SKU",
+            "Size", "Color", "Quantity", "Unit Price", "Total Price",
+        ])
+        for r in items:
+            writer.writerow([
+                r["order_id"], r["order_date"], r["product_name"], r["sku"],
+                r["size"], r["color"], r["quantity"],
+                r["unit_price"], r["total_price"],
+            ])
     return output.getvalue()
 
 

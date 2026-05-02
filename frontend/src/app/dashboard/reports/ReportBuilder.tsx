@@ -47,6 +47,9 @@ const DATE_PRESETS: { value: DatePreset; label: string }[] = [
 ];
 
 const DATE_FILTER_REPORTS = new Set<ReportType>(["orders", "sales", "material-consumption", "production"]);
+// Reports where the customer dropdown is meaningful. Orders has had it from
+// the start; sales gained it for the per-customer revenue export.
+const CUSTOMER_FILTER_REPORTS = new Set<ReportType>(["orders", "sales"]);
 
 // Three active statuses only. Reports filter by these — historical orders
 // stuck at deprecated statuses are still readable, but not exposed as filter
@@ -174,6 +177,18 @@ function EmptyState() {
   );
 }
 
+interface SalesOrderItem {
+  order_id: number;
+  order_date: string;
+  product_name: string;
+  sku: string;
+  size: string;
+  color: string;
+  quantity: number;
+  unit_price: number;
+  total_price: number;
+}
+
 interface SalesData {
   summary: {
     total_orders: number;
@@ -183,12 +198,38 @@ interface SalesData {
   };
   by_day: { date: string; count: number; revenue: number }[];
   by_customer: { customer_name: string; company_name: string | null; orders: number; revenue: number }[];
+  selected_customer?: { id: number; name: string; company_name: string | null } | null;
+  selected_order?: { id: number; order_date: string; status: string } | null;
+  order_items?: SalesOrderItem[];
 }
 
 function SalesPreview({ data }: { data: SalesData }) {
-  const { summary, by_day, by_customer } = data;
+  const { summary, by_day, by_customer, selected_customer, selected_order, order_items } = data;
   return (
     <div className="space-y-6">
+      {selected_customer && (
+        <div className="bg-brand-50 border border-brand-200 rounded-lg px-4 py-3">
+          <p className="text-xs text-gray-600">Ընտրված հաճախորդ</p>
+          <p className="text-sm font-semibold text-brand-900 mt-0.5">
+            {selected_customer.name}
+            {selected_customer.company_name && (
+              <span className="text-gray-600 font-normal">
+                {" · "}{selected_customer.company_name}
+              </span>
+            )}
+          </p>
+          {selected_order && (
+            <p className="text-xs text-brand-800 mt-1">
+              Ընտրված պատվեր: <span className="font-semibold">#{selected_order.id}</span>
+              <span className="text-gray-600 font-normal">
+                {" · "}{selected_order.order_date}
+                {" · "}{selected_order.status}
+              </span>
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { label: "Bnor patverner", value: summary.total_orders, color: "text-blue-700" },
@@ -257,7 +298,45 @@ function SalesPreview({ data }: { data: SalesData }) {
         </div>
       )}
 
-      {by_day.length === 0 && by_customer.length === 0 && (
+      {order_items && order_items.length > 0 && (
+        <div>
+          <h4 className="text-sm font-semibold text-gray-700 mb-2">Order Items</h4>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200">
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Order #</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Date</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Product</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">SKU</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Չափս</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Գույն</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Քանակ</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Միավորի գին</th>
+                  <th className="text-left py-2 text-gray-500 font-medium">Ընդհանուր</th>
+                </tr>
+              </thead>
+              <tbody>
+                {order_items.map((row, i) => (
+                  <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="py-2 pr-4 font-medium">#{row.order_id}</td>
+                    <td className="py-2 pr-4">{row.order_date}</td>
+                    <td className="py-2 pr-4">{row.product_name || "—"}</td>
+                    <td className="py-2 pr-4 font-mono text-xs text-gray-500">{row.sku || "—"}</td>
+                    <td className="py-2 pr-4">{row.size}</td>
+                    <td className="py-2 pr-4">{row.color}</td>
+                    <td className="py-2 pr-4">{formatNumber(row.quantity)}</td>
+                    <td className="py-2 pr-4">{formatCurrency(row.unit_price)}</td>
+                    <td className="py-2 font-medium">{formatCurrency(row.total_price)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {by_day.length === 0 && by_customer.length === 0 && (!order_items || order_items.length === 0) && (
         <EmptyState />
       )}
     </div>
@@ -347,6 +426,8 @@ export function ReportBuilder({
   const [customEnd, setCustomEnd] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [customerFilter, setCustomerFilter] = useState("");
+  const [orderFilter, setOrderFilter] = useState("");
+  const [customerOrders, setCustomerOrders] = useState<{ id: number; date: string }[]>([]);
   const [materialFilter, setMaterialFilter] = useState("");
   const [stageFilter, setStageFilter] = useState("");
   const [loading, setLoading] = useState(false);
@@ -365,7 +446,12 @@ export function ReportBuilder({
     }
     if (reportType === "orders") {
       if (statusFilter) p.set("status", statusFilter);
-      if (customerFilter) p.set("customer_id", customerFilter);
+    }
+    if (CUSTOMER_FILTER_REPORTS.has(reportType) && customerFilter) {
+      p.set("customer_id", customerFilter);
+      if (reportType === "sales" && orderFilter) {
+        p.set("order_id", orderFilter);
+      }
     }
     if (reportType === "material-consumption" && materialFilter) {
       p.set("material_id", materialFilter);
@@ -390,8 +476,29 @@ export function ReportBuilder({
         setError(err.detail || "Չhajogvets bozhel hasvetvowthouthy");
         return;
       }
-      setReportData(await res.json());
+      const json = await res.json();
+      setReportData(json);
       setGenerated(true);
+
+      // Snapshot the customer's full order list from a customer-only sales
+      // generate (no order filter). Subsequent order-filtered generates keep
+      // the previous snapshot so the dropdown stays populated.
+      if (
+        reportType === "sales" &&
+        customerFilter &&
+        !orderFilter &&
+        json &&
+        Array.isArray(json.order_items)
+      ) {
+        const seen = new Map<number, string>();
+        for (const it of json.order_items as SalesOrderItem[]) {
+          if (!seen.has(it.order_id)) seen.set(it.order_id, it.order_date);
+        }
+        const next = Array.from(seen.entries())
+          .map(([id, date]) => ({ id, date }))
+          .sort((a, b) => b.id - a.id);
+        setCustomerOrders(next);
+      }
     } catch {
       setError("Կapich sxal");
     } finally {
@@ -408,11 +515,20 @@ export function ReportBuilder({
     setReportType(type);
     setStatusFilter("");
     setCustomerFilter("");
+    setOrderFilter("");
+    setCustomerOrders([]);
     setMaterialFilter("");
     setStageFilter("");
     setGenerated(false);
     setReportData(null);
     setError("");
+  }
+
+  function handleCustomerChange(value: string) {
+    setCustomerFilter(value);
+    // Switching customer invalidates the previous customer's order list.
+    setOrderFilter("");
+    setCustomerOrders([]);
   }
 
   const rows = Array.isArray(reportData) ? (reportData as Record<string, unknown>[]) : [];
@@ -489,39 +605,56 @@ export function ReportBuilder({
           )}
 
           {/* Optional filters */}
-          {(reportType === "orders" || reportType === "material-consumption" || reportType === "production") && (
+          {(CUSTOMER_FILTER_REPORTS.has(reportType) || reportType === "material-consumption" || reportType === "production") && (
             <div className="flex flex-wrap gap-4">
               {reportType === "orders" && (
-                <>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Կարգավիչակ</label>
-                    <select
-                      value={statusFilter}
-                      onChange={(e) => setStatusFilter(e.target.value)}
-                      className="text-sm rounded-lg border border-gray-300 px-3 py-2 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
-                    >
-                      <option value="">Բոլոր</option>
-                      {ORDER_STATUSES.map((s) => (
-                        <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Հաճախորդ</label>
-                    <select
-                      value={customerFilter}
-                      onChange={(e) => setCustomerFilter(e.target.value)}
-                      className="text-sm rounded-lg border border-gray-300 px-3 py-2 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
-                    >
-                      <option value="">Բոլոր</option>
-                      {customers.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}{c.company_name ? ` (${c.company_name})` : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Կարգավիչակ</label>
+                  <select
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value)}
+                    className="text-sm rounded-lg border border-gray-300 px-3 py-2 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                  >
+                    <option value="">Բոլոր</option>
+                    {ORDER_STATUSES.map((s) => (
+                      <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {CUSTOMER_FILTER_REPORTS.has(reportType) && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Հաճախորդ</label>
+                  <select
+                    value={customerFilter}
+                    onChange={(e) => handleCustomerChange(e.target.value)}
+                    className="text-sm rounded-lg border border-gray-300 px-3 py-2 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                  >
+                    <option value="">Բոլոր</option>
+                    {customers.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}{c.company_name ? ` (${c.company_name})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {reportType === "sales" && customerFilter && customerOrders.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Պատվեր</label>
+                  <select
+                    value={orderFilter}
+                    onChange={(e) => setOrderFilter(e.target.value)}
+                    className="text-sm rounded-lg border border-gray-300 px-3 py-2 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                  >
+                    <option value="">Բոլոր պատվերները</option>
+                    {customerOrders.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        #{o.id} ({o.date})
+                      </option>
+                    ))}
+                  </select>
+                </div>
               )}
               {reportType === "material-consumption" && (
                 <div>
