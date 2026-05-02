@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import require_admin
+from app.dependencies import require_roles, ACTIVITY_VIEW
 from app.activity import service, schemas
 from app.users.models import User
 
@@ -20,7 +20,7 @@ async def list_activity_logs(
     from_date: datetime | None = Query(None),
     to_date: datetime | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*ACTIVITY_VIEW)),
 ):
     items, total = await service.list_activities(
         db,

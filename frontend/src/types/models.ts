@@ -1,7 +1,14 @@
+export type UserRole =
+  | "admin"
+  | "director"
+  | "production_manager"
+  | "warehouse_manager"
+  | "simple_user";
+
 export interface User {
   id: number;
   email: string;
-  role: "admin" | "simple_user";
+  role: UserRole;
   is_active: boolean;
   customer_id: number | null;
   discount_percent: number;

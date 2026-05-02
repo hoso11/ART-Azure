@@ -84,7 +84,8 @@ Image tag history (relevant):
 | `art-backend:v31` | Retired | Orders list dropdown enforces stock-aware status options (no `Ավարտված` selectable when stock is short). |
 | `art-backend:v32` | Retired | Stock-based production batches accept partial completion: `/complete` is now a delta over the cumulative `good_quantity` / `damaged_quantity`; emits `production.batch_progress` on partials, `production.batch_completed` on the final delta. |
 | `art-backend:v33` | Retired | Sales report accepts optional `customer_id`; response gains `selected_customer` block and per-customer `order_items` list; CSV filename becomes `customer-report-<slug>-<YYYY-MM-DD>.csv` when filtered. |
-| `art-backend:v34` | **Live** | Sales report adds optional `order_id` (requires `customer_id`); response gains `selected_order` block; CSV filename becomes `customer-report-<slug>-order-<id>-<YYYY-MM-DD>.csv` when both filters are set. New error codes: `order_id_requires_customer_id` (422), `order_not_found` (404), `order_not_for_customer` (422). No DB migration. |
+| `art-backend:v34` | Retired | Sales report adds optional `order_id` (requires `customer_id`); response gains `selected_order` block; CSV filename becomes `customer-report-<slug>-order-<id>-<YYYY-MM-DD>.csv` when both filters are set. New error codes: `order_id_requires_customer_id` (422), `order_not_found` (404), `order_not_for_customer` (422). No DB migration. |
+| `art-backend:v35` | **Live** | RBAC — five-role authorization matrix. Extends `UserRole` enum with `director`, `production_manager`, `warehouse_manager`. Migration `012_extend_user_roles` adds the new ENUM values via `ALTER TYPE userrole ADD VALUE IF NOT EXISTS …` (non-destructive, forward-only). Centralized `require_roles(*allowed)` factory + role-group constants in `app.dependencies`. Per-route guards rewritten across all routers. Service helpers `can_assign_role` / `can_manage_user` / `is_last_active_admin`. New error codes: `role_assignment_denied` (403), `user_management_denied` (403), `self_role_change_denied` (403), `self_deactivation_denied` (403), `last_admin_required` (422). Tests: `backend/tests/test_authorization_matrix.py` (51 passed, 2 skipped). |
 | `art-frontend:v20` | Retired | Last working pre-gallery frontend. |
 | `art-frontend:v21` | **Forbidden** | Built from `frontend/Dockerfile` (dev mode `npm run dev`); crashed at runtime in Azure with PostCSS / Tailwind error. |
 | `art-frontend:v22` | **Forbidden** | Production build, but MSYS-mangled `NEXT_PUBLIC_API_URL` poisoned every client-side fetch. |
@@ -94,7 +95,8 @@ Image tag history (relevant):
 | `art-frontend:v28` | Retired | Production page: per-batch delta inputs (Լավ + Խոտան), running cumulative + remaining display, "Բոլոր մնացածը …" shortcuts (paired with backend v32). |
 | `art-frontend:v29` | Retired | Reports page: per-customer sales report — customer dropdown, "Ընտրված հաճախորդ" header, "Order Items" table (paired with backend v33). |
 | `art-frontend:v30` | Retired | Reports page bug fix — customer / material dropdowns now request `?limit=100` (the backend's declared cap) instead of `?limit=200` which was silently failing 422 and leaving both dropdowns empty. |
-| `art-frontend:v31` | **Live** | Reports page: per-order sales report — second dropdown ("Պատվեր") appears after a customer is selected and a customer-scoped report has been generated, populated from the response's `order_items`. Selecting an order re-generates the report scoped to that order; "Բոլոր պատվերները" returns to all-orders view. |
+| `art-frontend:v31` | Retired | Reports page: per-order sales report — second dropdown ("Պատվեր") appears after a customer is selected and a customer-scoped report has been generated, populated from the response's `order_items`. Selecting an order re-generates the report scoped to that order; "Բոլոր պատվերները" returns to all-orders view. |
+| `art-frontend:v32` | **Live** | RBAC — sidebar / dashboard route / user-form gating per role. New `frontend/src/lib/permissions.ts` (single source of truth: `MODULE_ACCESS`, `canAccessModule`, `canAssignRole`, `allowedRolesFor`, `ROLE_LABELS`). `requireRoles(...)` and `requireModule(module)` helpers added to `frontend/src/lib/auth.ts`. Sidebar / TopHeader / MobileNav driven by `canAccessModule` and `ROLE_LABELS`. Dashboard route guards migrated from binary admin/user to per-module / per-role checks. User-create and user-edit forms restrict the role `<Select>` options via `allowedRolesFor(actor)`; the role select is disabled on self-edit (UI hint matching the backend self-role-change guard). New Armenian labels: `Տնօրեն`, `Արտադրության ղեկավար`, `Պահեստապետ`. |
 
 Blacklisted in `terraform/envs/dev/variables.tf` validation:
 - Frontend: `v13`, `v21`, `v22`, `v23`.
@@ -312,7 +314,7 @@ After the 12-month window expires, B1MS bills ~$15/month and 32 GB SSD bills ~$3
 
 ## Verifying confirmed-working features
 
-Each feature below is part of the live deployment as of v31 (frontend) / v34 (backend):
+Each feature below is part of the live deployment as of v32 (frontend) / v35 (backend):
 
 | Feature | Manual check |
 |---|---|
@@ -326,6 +328,7 @@ Each feature below is part of the live deployment as of v31 (frontend) / v34 (ba
 | Sales report — all customers | `/dashboard/reports` → "Վաճառքների հաշվետվություն" → leave customer empty → "Ստեղծել Հաշվետվություն" → summary cards reflect every revenue-eligible order. CSV downloads as `sales_report.csv`. |
 | Sales report — one customer | Same page, pick a customer, generate. Header shows "Ընտրված հաճախորդ"; summary, by-day, by-customer, and Order Items table all scope to that customer. CSV downloads as `customer-report-<slug>-<YYYY-MM-DD>.csv`. |
 | Sales report — one customer + one order | After generating a customer-scoped report, the "Պատվեր" dropdown appears, populated from the response's `order_items`. Pick an order, regenerate. Header shows "Ընտրված պատվեր: #N"; every section scopes to that single order. CSV downloads as `customer-report-<slug>-order-<id>-<YYYY-MM-DD>.csv`. |
+| RBAC — five user roles | Browser: log in as admin → sidebar shows full nav. Backend: `curl -i $(terraform output -raw backend_url)/api/v1/users -b cookies.txt` returns 200 with all users. Pydantic rejects unknown role: `curl … -X POST … -d '{"email":"x@y.com","password":"Passw0rd!","role":"hacker"}'` returns 422. Director restriction: a director's `GET /users` lists only `simple_user` rows; `POST /users` with `role:"admin"` returns 403 `role_assignment_denied`. Self-role-change: admin's `PATCH /users/{own_id}` with `{"role":"simple_user"}` returns 403 `self_role_change_denied`. New Armenian labels visible in the user create/edit modals' role `<Select>`: `Տնօրեն` / `Արտադրության ղեկավար` / `Պահեստապետ`. |
 
 ### Sales report API — error contract
 

@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireModule } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { ProductionStage } from "@/types";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
@@ -19,7 +19,7 @@ export default async function ProductionDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requireAdmin();
+  await requireModule("production");
   const { id } = await params;
   const stage = await serverGet<ProductionStage>(`/production/${id}`);
 

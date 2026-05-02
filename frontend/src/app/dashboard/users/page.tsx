@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireModule } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, User, Customer } from "@/types";
 import { Card, CardContent } from "@/components/ui/Card";
@@ -6,13 +6,22 @@ import { Badge } from "@/components/ui/Badge";
 import { formatDate } from "@/lib/utils";
 import Link from "next/link";
 import { CreateUserButton } from "./UserActions";
+import { ROLE_LABELS } from "@/lib/permissions";
+
+const ROLE_BADGE_CLASS: Record<string, string> = {
+  admin: "bg-purple-100 text-purple-800",
+  director: "bg-amber-100 text-amber-800",
+  production_manager: "bg-emerald-100 text-emerald-800",
+  warehouse_manager: "bg-cyan-100 text-cyan-800",
+  simple_user: "bg-blue-100 text-blue-800",
+};
 
 export default async function UsersPage({
   searchParams,
 }: {
   searchParams: Promise<{ page?: string }>;
 }) {
-  await requireAdmin();
+  const session = await requireModule("users");
   const params = await searchParams;
   const page = parseInt(params.page || "1");
 
@@ -25,7 +34,7 @@ export default async function UsersPage({
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Օգտատերեր</h1>
-        <CreateUserButton customers={customersData?.items || []} />
+        <CreateUserButton customers={customersData?.items || []} actorRole={session.role} />
       </div>
 
       <Card>
@@ -49,8 +58,8 @@ export default async function UsersPage({
                 <tr key={user.id} className="hover:bg-gray-50">
                   <td className="px-6 py-4 text-sm font-medium text-gray-900">{user.email}</td>
                   <td className="px-6 py-4">
-                    <Badge className={user.role === "admin" ? "bg-purple-100 text-purple-800" : "bg-blue-100 text-blue-800"}>
-                      {user.role === "admin" ? "Ադմին" : "Օգտատեր"}
+                    <Badge className={ROLE_BADGE_CLASS[user.role] ?? "bg-gray-100 text-gray-800"}>
+                      {ROLE_LABELS[user.role] ?? user.role}
                     </Badge>
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-600">{user.customer_id ? `#${user.customer_id}` : "—"}</td>

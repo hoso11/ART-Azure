@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireModule } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, Material } from "@/types";
 import { Card, CardContent } from "@/components/ui/Card";
@@ -12,7 +12,7 @@ export default async function InventoryPage({
 }: {
   searchParams: Promise<{ page?: string; filter?: string }>;
 }) {
-  await requireAdmin();
+  await requireModule("inventory");
   const params = await searchParams;
   const page = parseInt(params.page || "1");
   const filter = params.filter === "low_stock" ? "low_stock" : "";

@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireModule } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { DashboardStats, OrderTrend, PaginatedResponse } from "@/types";
 import { Customer, Material } from "@/types/models";
@@ -7,7 +7,7 @@ import { DashboardCharts } from "../DashboardCharts";
 import { ReportBuilder } from "./ReportBuilder";
 
 export default async function ReportsPage() {
-  await requireAdmin();
+  await requireModule("reports");
 
   const [stats, trends, customersData, materialsData] = await Promise.all([
     serverGet<DashboardStats>("/reports/dashboard"),

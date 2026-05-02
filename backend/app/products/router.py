@@ -6,7 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.dependencies import require_admin, require_authenticated
+from app.dependencies import (
+    require_admin,
+    require_authenticated,
+    require_roles,
+    BUSINESS_MANAGER,
+    PRODUCTS_VIEW,
+)
 from app.exceptions import NotFoundException, ValidationException
 from app.products import service, schemas
 from app.products.schemas import CategoryCreate, CategoryUpdate, CategoryResponse
@@ -91,7 +97,7 @@ async def create_category(
     data: CategoryCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     cat = await service.create_category(db, **data.model_dump())
     await activity_service.log_activity(
@@ -108,7 +114,7 @@ async def update_category(
     data: CategoryUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     cat = await service.update_category(db, category_id, **data.model_dump(exclude_unset=True))
     await activity_service.log_activity(
@@ -124,7 +130,7 @@ async def delete_category(
     category_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     await service.delete_category(db, category_id)
     await activity_service.log_activity(
@@ -144,7 +150,7 @@ async def list_products(
     search: str | None = Query(None),
     category_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_authenticated),
+    current_user: User = Depends(require_roles(*PRODUCTS_VIEW)),
     storage: StorageService = Depends(get_storage_service),
 ):
     products, total = await service.list_products(db, page, limit, sort_by, sort_order, search, category_id)
@@ -184,7 +190,7 @@ async def list_public_products(
 async def get_product(
     product_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_authenticated),
+    current_user: User = Depends(require_roles(*PRODUCTS_VIEW)),
     storage: StorageService = Depends(get_storage_service),
 ):
     product = await service.get_product_by_id(db, product_id)
@@ -200,7 +206,7 @@ async def create_product(
     data: schemas.ProductCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     dump = data.model_dump()
     variants = [v.model_dump() for v in data.variants]
@@ -220,7 +226,7 @@ async def update_product(
     data: schemas.ProductUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
     storage: StorageService = Depends(get_storage_service),
 ):
     existing = await service.get_product_by_id(db, product_id)
@@ -242,7 +248,7 @@ async def delete_product(
     product_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     existing = await service.get_product_by_id(db, product_id)
     snapshot = _product_snapshot(existing)
@@ -263,7 +269,7 @@ async def create_variant(
     data: schemas.VariantCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     variant = await service.create_variant(db, product_id, **data.model_dump())
     await activity_service.log_activity(
@@ -280,7 +286,7 @@ async def update_variant(
     data: schemas.VariantUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     from app.products.models import ProductVariant
     from sqlalchemy import select as _sel
@@ -304,7 +310,7 @@ async def delete_variant(
     variant_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     from app.products.models import ProductVariant
     from sqlalchemy import select as _sel
@@ -333,7 +339,7 @@ async def delete_variant(
 async def list_size_requirements(
     product_id: int,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     reqs = await service.list_product_size_requirements(db, product_id)
     return [schemas.ProductSizeMaterialRequirementResponse.model_validate(r) for r in reqs]
@@ -348,7 +354,7 @@ async def add_size_requirement(
     product_id: int,
     data: schemas.ProductSizeMaterialRequirementCreate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     req = await service.add_product_size_requirement(
         db, product_id, data.material_id, data.size, data.quantity_per_item
@@ -365,7 +371,7 @@ async def update_size_requirement(
     req_id: int,
     data: schemas.ProductSizeMaterialRequirementUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     req = await service.update_product_size_requirement(db, req_id, data.quantity_per_item)
     return schemas.ProductSizeMaterialRequirementResponse.model_validate(req)
@@ -376,7 +382,7 @@ async def delete_size_requirement(
     product_id: int,
     req_id: int,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     await service.delete_product_size_requirement(db, req_id)
 
@@ -389,7 +395,7 @@ async def upload_image(
     file: UploadFile = File(...),
     is_primary: bool = Query(False),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
     storage: StorageService = Depends(get_storage_service),
 ):
     # Validate content type
@@ -445,7 +451,7 @@ async def stream_image_file(
 async def set_image_primary(
     image_id: int,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
     storage: StorageService = Depends(get_storage_service),
 ):
     image = await service.set_image_primary(db, image_id)
@@ -458,7 +464,7 @@ async def set_image_primary(
 async def delete_image(
     image_id: int,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
     storage: StorageService = Depends(get_storage_service),
 ):
     storage_key = await service.delete_product_image(db, image_id)
@@ -472,7 +478,7 @@ async def add_material(
     product_id: int,
     data: schemas.ProductMaterialCreate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     pm = await service.add_product_material(db, product_id, data.material_id, data.quantity_required, data.unit)
     return schemas.ProductMaterialResponse.model_validate(pm)
@@ -482,6 +488,6 @@ async def add_material(
 async def remove_material(
     pm_id: int,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     await service.delete_product_material(db, pm_id)

@@ -5,11 +5,13 @@ export interface PaginatedResponse<T> {
   limit: number;
 }
 
+import type { UserRole } from "./models";
+
 export interface AuthResponse {
   message: string;
   user_id: number;
   email: string;
-  role: string;
+  role: UserRole;
 }
 
 export interface ApiError {

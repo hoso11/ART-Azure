@@ -35,7 +35,7 @@ Key Vault, ACR, paid monitoring are still out of scope. Cost target while
 the 12-month window is open: **$0/month**. After it closes, see "Cost after
 free-tier expires" below.
 
-**Live as of latest apply:** `frontend_image_tag = v24`, `backend_image_tag = v30`.
+**Live as of latest apply:** `frontend_image_tag = v32`, `backend_image_tag = v35`.
 
 ## What gets created
 
@@ -144,8 +144,8 @@ Optional, with sensible defaults:
 
 | Variable | Default | When to change |
 |---|---|---|
-| `frontend_image_tag` | `v24` | Bump when you publish a new frontend image. **Never set to `v13`, `v21`, `v22`, or `v23`** — validation block in `variables.tf` rejects them. v13: failed migration 009; v21: dev-mode build crashed on Tailwind PostCSS; v22/v23: MSYS-mangled `NEXT_PUBLIC_API_URL` poisoned every client-side fetch. See `handoff/KNOWN_RISKS.md` and `handoff/ROLLBACK_NOTES.md`. |
-| `backend_image_tag` | `v30` | Bump when you publish a new backend image. **Never set to `v13`, `v26`, or `v27`** — validation in `variables.tf` rejects them. v30 is the current live tag (Tasks C1/C2a/C2b — least-privilege Postgres `art_app` runtime role + Azure Blob Managed Identity, no shared keys). v25–v29 are intermediate retired tags; v26/v27 contained the slowapi rate-limiter bugs. |
+| `frontend_image_tag` | `v24` (default in `variables.tf`); **dev tfvars currently sets `v32`** | Bump when you publish a new frontend image. **Never set to `v13`, `v21`, `v22`, or `v23`** — validation block in `variables.tf` rejects them. v13: failed migration 009; v21: dev-mode build crashed on Tailwind PostCSS; v22/v23: MSYS-mangled `NEXT_PUBLIC_API_URL` poisoned every client-side fetch. See `handoff/KNOWN_RISKS.md` and `handoff/ROLLBACK_NOTES.md`. |
+| `backend_image_tag` | `v30` (default in `variables.tf`); **dev tfvars currently sets `v35`** | Bump when you publish a new backend image. **Never set to `v13`, `v26`, or `v27`** — validation in `variables.tf` rejects them. v35 is the current live tag (RBAC five-role authorization matrix, migration `012_extend_user_roles`); v34 added per-order sales report; v33 added per-customer sales report; v32 added partial production batch completion; v31 added stock-aware orders dropdown; v30 covered Tasks C1/C2a/C2b. v25–v29 are intermediate retired tags; v26/v27 contained the slowapi rate-limiter bugs. |
 | `enable_storage_role_assignment` | `false` | Two-stage apply gate for the backend MI's `Storage Blob Data Contributor` role (Task C2a). Default `false` keeps the role assignment OUT of fresh applies so the planner doesn't fail on `identity[0]` being null when adding identity to an existing Web App. The dev tfvars sets this to `true` post-bootstrap to keep the role assignment in state. See "Task C2a two-stage apply" below. |
 | `backend_enabled` | `true` | Set `false` to stop the backend without destroying it (zero CPU, $0). |
 | `worker_sidecar_enabled` | `true` | Set `false` if you want backend without Celery (skips worker/beat). |

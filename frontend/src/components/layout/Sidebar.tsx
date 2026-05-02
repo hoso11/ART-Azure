@@ -3,41 +3,51 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import type { UserRole } from "@/types/models";
+import { canAccessModule, type Module } from "@/lib/permissions";
 
 interface NavItem {
   label: string;
   href: string;
   icon: React.ReactNode;
+  module: Module;
 }
 
-const adminNav: NavItem[] = [
-  { label: "Վահանակ", href: "/dashboard", icon: <DashboardIcon /> },
-  { label: "Պատվերներ", href: "/dashboard/orders", icon: <OrdersIcon /> },
-  { label: "Արտադրություն", href: "/dashboard/production", icon: <ProductionIcon /> },
-  { label: "Ապրանքներ", href: "/dashboard/products", icon: <ProductsIcon /> },
-  { label: "Պահեստ", href: "/dashboard/inventory", icon: <InventoryIcon /> },
-  { label: "Հաճախորդներ", href: "/dashboard/customers", icon: <CustomersIcon /> },
-  { label: "Օգտատերեր", href: "/dashboard/users", icon: <UsersIcon /> },
-  { label: "Հաշվետվություններ", href: "/dashboard/reports", icon: <ReportsIcon /> },
-  { label: "Գործողությունների պատմություն", href: "/dashboard/activity", icon: <ActivityIcon /> },
+// Single full menu, filtered per role from the permissions table. Order
+// matches the previous adminNav so admin sees an unchanged sidebar.
+const MANAGEMENT_NAV: NavItem[] = [
+  { label: "Վահանակ", href: "/dashboard", icon: <DashboardIcon />, module: "dashboard" },
+  { label: "Պատվերներ", href: "/dashboard/orders", icon: <OrdersIcon />, module: "orders" },
+  { label: "Արտադրություն", href: "/dashboard/production", icon: <ProductionIcon />, module: "production" },
+  { label: "Ապրանքներ", href: "/dashboard/products", icon: <ProductsIcon />, module: "products" },
+  { label: "Պահեստ", href: "/dashboard/inventory", icon: <InventoryIcon />, module: "inventory" },
+  { label: "Հաճախորդներ", href: "/dashboard/customers", icon: <CustomersIcon />, module: "customers" },
+  { label: "Օգտատերեր", href: "/dashboard/users", icon: <UsersIcon />, module: "users" },
+  { label: "Հաշվետվություններ", href: "/dashboard/reports", icon: <ReportsIcon />, module: "reports" },
+  { label: "Գործողությունների պատմություն", href: "/dashboard/activity", icon: <ActivityIcon />, module: "activity" },
 ];
 
-const userNav: NavItem[] = [
-  { label: "Վահանակ", href: "/dashboard", icon: <DashboardIcon /> },
-  { label: "Կատալոգ", href: "/catalog", icon: <ProductsIcon /> },
-  { label: "Իմ պատվերներ", href: "/dashboard/orders", icon: <OrdersIcon /> },
-  { label: "Հաշիվ", href: "/dashboard/account", icon: <UsersIcon /> },
+// Customer portal — unchanged. Kept separate so simple_user does not see any
+// management modules even if the access table were misconfigured.
+const CUSTOMER_NAV: NavItem[] = [
+  { label: "Վահանակ", href: "/dashboard", icon: <DashboardIcon />, module: "dashboard" },
+  { label: "Կատալոգ", href: "/catalog", icon: <ProductsIcon />, module: "catalog" },
+  { label: "Իմ պատվերներ", href: "/dashboard/orders", icon: <OrdersIcon />, module: "orders" },
+  { label: "Հաշիվ", href: "/dashboard/account", icon: <UsersIcon />, module: "account" },
 ];
 
 interface SidebarProps {
-  role: string;
+  role: UserRole;
   className?: string;
   onNavigate?: () => void;
 }
 
 export function Sidebar({ role, className, onNavigate }: SidebarProps) {
   const pathname = usePathname();
-  const nav = role === "admin" ? adminNav : userNav;
+  const nav =
+    role === "simple_user"
+      ? CUSTOMER_NAV
+      : MANAGEMENT_NAV.filter((item) => canAccessModule(role, item.module));
 
   return (
     <aside className={cn("w-64 bg-brand-900 text-white min-h-screen flex flex-col", className)}>

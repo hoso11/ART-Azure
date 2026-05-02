@@ -6,21 +6,36 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { FormField, Input, Select } from "@/components/ui/FormField";
 import { User, Customer } from "@/types";
+import type { UserRole } from "@/types/models";
+import { allowedRolesFor, ROLE_LABELS } from "@/lib/permissions";
 
 interface EditUserFormProps {
   user: User;
   customers: Customer[];
+  actorRole: UserRole;
+  // True when the actor is editing their own account. Disables the role
+  // <Select> (backend would 403 self-role-change anyway) and surfaces a hint.
+  isSelf?: boolean;
 }
 
-export function EditUserForm({ user, customers }: EditUserFormProps) {
+export function EditUserForm({ user, customers, actorRole, isSelf = false }: EditUserFormProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  // Roles the actor can assign. Always include the user's *current* role so
+  // editing other fields without changing the role works for users whose role
+  // the actor cannot assign (e.g. director editing a simple_user is fine, but
+  // can't set the role to anything else).
+  const allowed = allowedRolesFor(actorRole);
+  const roleOptions: UserRole[] = allowed.includes(user.role)
+    ? allowed
+    : [user.role, ...allowed];
+
   const [email, setEmail] = useState(user.email);
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState(user.role);
+  const [role, setRole] = useState<UserRole>(user.role);
   const [customerId, setCustomerId] = useState(user.customer_id?.toString() || "");
   const [discountPercent, setDiscountPercent] = useState(String(user.discount_percent ?? 0));
 
@@ -86,10 +101,20 @@ export function EditUserForm({ user, customers }: EditUserFormProps) {
           </FormField>
 
           <FormField label="Դեր" required>
-            <Select value={role} onChange={(e) => setRole(e.target.value as User["role"])}>
-              <option value="simple_user">Օգտատեր</option>
-              <option value="admin">Ադմին</option>
+            <Select
+              value={role}
+              onChange={(e) => setRole(e.target.value as UserRole)}
+              disabled={isSelf}
+            >
+              {roleOptions.map((r) => (
+                <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+              ))}
             </Select>
+            {isSelf && (
+              <p className="mt-1 text-xs text-gray-500">
+                Չեք կարող փոխել ձեր սեփական դերը
+              </p>
+            )}
           </FormField>
 
           <FormField label="Կապված հաճախորդ">

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import require_admin
+from app.dependencies import require_roles, BUSINESS_MANAGER
 from app.production import service, schemas
 from app.users.models import User
 from app.activity import service as activity_service
@@ -21,7 +21,7 @@ async def list_stages(
     active: bool = Query(False),
     one_per_order: bool = Query(False),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     if one_per_order:
         # Aggregated view: one row per order, picked deterministically by
@@ -46,7 +46,7 @@ async def list_stages(
 @router.get("/summary")
 async def get_production_summary(
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     return await service.get_production_summary(db)
 
@@ -64,7 +64,7 @@ async def create_production_batch(
     data: schemas.ProductionBatchCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     batch = await service.create_production_batch(
         db,
@@ -94,7 +94,7 @@ async def list_production_batches(
     limit: int = Query(20, ge=1, le=100),
     stage_status: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     batches, total = await service.list_production_batches(
         db, page=page, limit=limit, stage_status=stage_status
@@ -116,7 +116,7 @@ async def update_production_batch(
     data: schemas.ProductionBatchUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     existing = await service.get_production_batch_by_id(db, batch_id)
     old = {"current_stage": existing.current_stage, "stage_status": existing.stage_status}
@@ -145,7 +145,7 @@ async def complete_production_batch(
     data: schemas.BatchCompleteRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     """Apply a partial-progress delta to a stock-based batch.
 
@@ -217,7 +217,7 @@ async def create_stages_for_order(
     order_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     """Seed the five default stages for an order. Idempotent."""
     stages = await service.create_stages_for_order(db, order_id)
@@ -235,7 +235,7 @@ async def create_stages_for_order(
 async def get_stage(
     stage_id: int,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     stage = await service.get_stage_by_id(db, stage_id)
     return schemas.ProductionStageResponse.model_validate(stage)
@@ -247,7 +247,7 @@ async def update_stage(
     data: schemas.ProductionStageUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     existing = await service.get_stage_by_id(db, stage_id)
     old_stage = existing.stage_name
@@ -270,7 +270,7 @@ async def update_stage_status(
     data: schemas.StageStatusUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     existing = await service.get_stage_by_id(db, stage_id)
     old_status = existing.status
@@ -301,7 +301,7 @@ async def set_order_current(
     data: schemas.OrderCurrentUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     """Set the displayed (current_stage, current_status) for an order. May
     update multiple ProductionStage rows under the hood (to keep at most one

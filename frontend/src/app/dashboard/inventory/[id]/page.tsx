@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireModule } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { Material, StockMovement, PaginatedResponse } from "@/types";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
@@ -11,7 +11,7 @@ export default async function MaterialDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requireAdmin();
+  await requireModule("inventory");
   const { id } = await params;
 
   const [material, movements] = await Promise.all([

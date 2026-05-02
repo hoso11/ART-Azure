@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireRoles } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { Order } from "@/types";
 import Link from "next/link";
@@ -9,7 +9,7 @@ export default async function EditOrderPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requireAdmin();
+  await requireRoles("admin", "director", "production_manager");
   const { id } = await params;
   const order = await serverGet<Order>(`/orders/${id}`);
 

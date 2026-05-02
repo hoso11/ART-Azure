@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireModule } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, User, Customer } from "@/types";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
@@ -7,13 +7,22 @@ import { formatDate } from "@/lib/utils";
 import Link from "next/link";
 import { EditUserForm } from "../EditUserForm";
 import { DeactivateUserButton } from "../UserActions";
+import { ROLE_LABELS } from "@/lib/permissions";
+
+const ROLE_BADGE_CLASS: Record<string, string> = {
+  admin: "bg-purple-100 text-purple-800",
+  director: "bg-amber-100 text-amber-800",
+  production_manager: "bg-emerald-100 text-emerald-800",
+  warehouse_manager: "bg-cyan-100 text-cyan-800",
+  simple_user: "bg-blue-100 text-blue-800",
+};
 
 export default async function UserDetailPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requireAdmin();
+  const session = await requireModule("users");
   const { id } = await params;
 
   const [user, customersData] = await Promise.all([
@@ -25,6 +34,8 @@ export default async function UserDetailPage({
     return <div className="text-center py-12"><h1 className="text-xl font-semibold">User not found</h1></div>;
   }
 
+  const isSelf = user.id === session.user_id;
+
   return (
     <div>
       <Link href="/dashboard/users" className="text-sm text-brand-700 hover:underline">&larr; Վերադառնալ օգտատերեր</Link>
@@ -32,8 +43,15 @@ export default async function UserDetailPage({
       <div className="flex items-center justify-between mt-1 mb-6">
         <h1 className="text-2xl font-bold text-gray-900">{user.email}</h1>
         <div className="flex gap-2">
-          <EditUserForm user={user} customers={customersData?.items || []} />
-          <DeactivateUserButton userId={user.id} isActive={user.is_active} />
+          <EditUserForm
+            user={user}
+            customers={customersData?.items || []}
+            actorRole={session.role}
+            isSelf={isSelf}
+          />
+          {!isSelf && (
+            <DeactivateUserButton userId={user.id} isActive={user.is_active} />
+          )}
         </div>
       </div>
 
@@ -45,8 +63,8 @@ export default async function UserDetailPage({
             <div>
               <dt className="text-xs text-gray-500">Դեր</dt>
               <dd>
-                <Badge className={user.role === "admin" ? "bg-purple-100 text-purple-800" : "bg-blue-100 text-blue-800"}>
-                  {user.role === "admin" ? "Ադմին" : "Օգտատեր"}
+                <Badge className={ROLE_BADGE_CLASS[user.role] ?? "bg-gray-100 text-gray-800"}>
+                  {ROLE_LABELS[user.role] ?? user.role}
                 </Badge>
               </dd>
             </div>

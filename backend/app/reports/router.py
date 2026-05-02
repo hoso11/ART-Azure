@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import io
 
 from app.database import get_db
-from app.dependencies import require_admin
+from app.dependencies import require_roles, REPORT_MANAGEMENT, PRODUCTION_REPORTS
 from app.reports import service
 from app.users.models import User
 from app.activity import service as activity_service
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/reports", tags=["Reports"])
 @router.get("/dashboard")
 async def get_dashboard(
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*REPORT_MANAGEMENT)),
 ):
     return await service.get_dashboard_stats(db)
 
@@ -26,7 +26,7 @@ async def get_dashboard(
 async def get_order_trends(
     days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*REPORT_MANAGEMENT)),
 ):
     return await service.get_order_trends(db, days)
 
@@ -35,7 +35,7 @@ async def get_order_trends(
 async def export_orders_csv(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*REPORT_MANAGEMENT)),
 ):
     csv_content = await service.generate_orders_csv(db)
     await activity_service.log_activity(
@@ -87,7 +87,7 @@ async def get_orders_report(
     customer_id: int | None = Query(None),
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*REPORT_MANAGEMENT)),
 ):
     data = await service.get_orders_report(db, start_date, end_date, status, customer_id)
     await _audit_report(db, admin, request, "orders", format, {
@@ -107,7 +107,7 @@ async def get_sales_report(
     order_id: int | None = Query(None),
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*REPORT_MANAGEMENT)),
 ):
     """Sales / revenue report.
 
@@ -147,7 +147,7 @@ async def get_inventory_report(
     request: Request,
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*REPORT_MANAGEMENT)),
 ):
     data = await service.get_inventory_report(db)
     await _audit_report(db, admin, request, "inventory", format)
@@ -164,7 +164,7 @@ async def get_material_consumption_report(
     material_id: int | None = Query(None),
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*PRODUCTION_REPORTS)),
 ):
     data = await service.get_material_consumption_report(db, start_date, end_date, material_id)
     await _audit_report(db, admin, request, "material_consumption", format, {
@@ -183,7 +183,7 @@ async def get_production_report(
     stage: str | None = Query(None),
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*PRODUCTION_REPORTS)),
 ):
     data = await service.get_production_report(db, start_date, end_date, stage)
     await _audit_report(db, admin, request, "production", format, {
@@ -199,7 +199,7 @@ async def get_low_stock_report(
     request: Request,
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*REPORT_MANAGEMENT)),
 ):
     data = await service.get_low_stock_report(db)
     await _audit_report(db, admin, request, "low_stock", format)
@@ -213,7 +213,7 @@ async def get_customer_discount_report(
     request: Request,
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*REPORT_MANAGEMENT)),
 ):
     data = await service.get_customer_discount_report(db)
     await _audit_report(db, admin, request, "customer_discounts", format)
@@ -227,7 +227,7 @@ async def get_damaged_stock_report(
     request: Request,
     format: str = Query("json"),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*PRODUCTION_REPORTS)),
 ):
     data = await service.get_damaged_stock_report(db)
     await _audit_report(db, admin, request, "damaged_stock", format)

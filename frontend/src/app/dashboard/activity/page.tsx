@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireModule } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, ActivityLog } from "@/types";
 import { Card, CardContent } from "@/components/ui/Card";
@@ -102,7 +102,7 @@ export default async function ActivityPage({
     to_date?: string;
   }>;
 }) {
-  await requireAdmin();
+  await requireModule("activity");
   const params = await searchParams;
   const page = parseInt(params.page || "1");
 

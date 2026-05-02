@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireModule } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, Customer } from "@/types";
 import { Card, CardContent } from "@/components/ui/Card";
@@ -12,7 +12,7 @@ export default async function CustomersPage({
 }: {
   searchParams: Promise<{ page?: string }>;
 }) {
-  await requireAdmin();
+  await requireModule("customers");
   const params = await searchParams;
   const page = parseInt(params.page || "1");
 

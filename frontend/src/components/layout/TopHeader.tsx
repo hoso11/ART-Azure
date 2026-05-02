@@ -2,10 +2,12 @@
 
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
+import type { UserRole } from "@/types/models";
+import { ROLE_LABELS } from "@/lib/permissions";
 
 interface TopHeaderProps {
   email: string;
-  role: string;
+  role: UserRole;
   leadingSlot?: React.ReactNode;
 }
 
@@ -21,12 +23,14 @@ export function TopHeader({ email, role, leadingSlot }: TopHeaderProps) {
     router.refresh();
   };
 
+  const subtitle = role === "simple_user" ? "Հաճախորդի պորտալ" : "Կառավարում";
+
   return (
     <header className="bg-white border-b border-gray-200 px-4 sm:px-6 py-3 flex items-center justify-between gap-2">
       <div className="flex items-center gap-2 min-w-0">
         {leadingSlot}
         <div className="text-sm text-gray-500 truncate">
-          {role === "admin" ? "Կառավարում" : "Հաճախորդի պորտալ"}
+          {subtitle}
         </div>
       </div>
       <div className="flex items-center gap-2 sm:gap-4 min-w-0">
@@ -34,7 +38,7 @@ export function TopHeader({ email, role, leadingSlot }: TopHeaderProps) {
           {email}
         </span>
         <span className="text-xs px-2 py-1 rounded-full bg-brand-100 text-brand-800 font-medium whitespace-nowrap">
-          {role === "admin" ? "Ադմին" : "Օգտատեր"}
+          {ROLE_LABELS[role]}
         </span>
         <Button variant="ghost" size="sm" onClick={handleLogout} className="whitespace-nowrap">
           Դուրս գալ

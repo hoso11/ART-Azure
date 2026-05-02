@@ -29,7 +29,7 @@ The published image tag `:v13` was built from the failed-009 code. **It is not t
 
 ## 3. Entrypoint whitelist silently rewrites unknown stamps
 
-`backend/entrypoint.sh` runs a Python guard at boot that reads `alembic_version.version_num`. If the value is not in the whitelist (currently `001..004, 006, 007, 008, 010_batch_partial_outcome`), it **silently rewrites** the row to `006_order_item_fulfillment` and continues.
+`backend/entrypoint.sh` runs a Python guard at boot that reads `alembic_version.version_num`. If the value is not in the whitelist (currently `001..004, 006, 007, 008, 010_batch_partial_outcome, 011_order_stock_deducted, 012_extend_user_roles`), it **silently rewrites** the row to `006_order_item_fulfillment` and continues.
 
 This was deliberate — it allowed Azure databases stamped at a removed revision (`005_production_records`, transient `009_*`) to recover without manual SQL. But it has two sharp edges:
 
@@ -190,6 +190,28 @@ This fired during Task C2b: the first apply succeeded in flipping `shared_access
 - The SP must hold a Storage data-plane RBAC role on each storage account it touches — `Storage Blob Data Reader` is sufficient; `Storage Blob Data Contributor` / `Storage Blob Data Owner` also work. Subscription-scope Owner satisfies this transitively (current state).
 - If the SP is downgraded to Resource Manager `Contributor` only (control-plane), grant explicit `Storage Blob Data Owner` on `azurerm_storage_account.images` BEFORE the downgrade or all subsequent plans 403. See `handoff/SAFE_TASK_RULES.md` "Service Principal role for Terraform".
 - Do not remove `storage_use_azuread = true` from `providers.tf` while `shared_access_key_enabled = false`. The pair is required.
+
+## 14. RBAC userrole ENUM is forward-only — rollback to a pre-v35 backend is conditional
+
+What changed: migration `012_extend_user_roles` added `director`, `production_manager`, `warehouse_manager` to the existing `userrole` Postgres ENUM via three idempotent `ALTER TYPE userrole ADD VALUE IF NOT EXISTS …` statements. The migration is non-destructive and idempotent on the way up. **It is forward-only** — Postgres does not support `ALTER TYPE … DROP VALUE`, so the new values cannot be removed without dropping and recreating the type and column, which is destructive.
+
+What this means for rollback: a code rollback to backend `:v34` (or any pre-v35 image) is only data-safe **if no `users.role` row holds one of the three new values**. v34's Pydantic `UserRole` enum and SQLAlchemy `Enum(UserRole)` mapping refuse to materialize unknown values, so:
+
+- Login still works (token decode does not consult the DB enum until a query touches `users`).
+- `GET /api/v1/users` raises 500 on the row whose role is unknown to the model.
+- The users page errors out.
+
+**Rules:**
+
+- Before forcing a rollback to v34 / v31 (or any pre-RBAC backend), demote every non-original role back to `simple_user` via the `art_admin` DSN:
+  ```sql
+  UPDATE users SET role = 'simple_user'
+  WHERE role IN ('director', 'production_manager', 'warehouse_manager');
+  ```
+  Run this against the live DB *before* flipping `backend_image_tag` in tfvars. The rollback is otherwise safe (cookies issued by v35 stay valid against v34; the JWT carries the role string but `get_current_user` re-reads the DB on each request).
+- Live DB currently contains **one** non-original-role row: user id 7, `art@art.am`, role `director`. This was created intentionally as a smoke-test canary right after v35 came online. Any forced rollback today must include the demote step above. Don't forget the canary.
+- Do not attempt to remove the new ENUM values via ad-hoc SQL or a "downgrade" migration. The recreate sequence is destructive (drop column → drop type → recreate type with the original two values → recreate column → restore data) and is not part of any rollback plan in this repo.
+- Future agents: do not propose deleting migration 012, deleting `director` / `production_manager` / `warehouse_manager` from `UserRole`, or shrinking the role groups in `backend/app/dependencies.py` without first reading `ROLLBACK_NOTES.md` "RBAC ENUM extension is forward-only".
 
 ## 13. Sensitive files in the repo (load-bearing — read before any commit)
 

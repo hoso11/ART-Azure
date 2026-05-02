@@ -7,9 +7,9 @@ Snapshot as of the most recent verified working tree on `v12`. Future agents: co
 | Component | State | Live value |
 |---|---|---|
 | Resource group | applied | `rg-art-dev` (West Europe) |
-| Frontend Web App | applied, serving | `app-art-frontend-dev-art4242` on `asp-art-dev` (F1 Free) — image `hoso30/art-frontend:v31` |
-| Backend Web App | applied, serving | `app-art-backend-dev-art4242` on `asp-art-backend-dev` (F1 Free) — image `hoso30/art-backend:v34`. **System-Assigned identity** (Task C2a) — principal_id `8b108e0c-10af-4d3d-9a34-5f372f684064`. |
-| Backend `worker` sidecar | applied | image `hoso30/art-backend:v34`, running Celery worker + beat |
+| Frontend Web App | applied, serving | `app-art-frontend-dev-art4242` on `asp-art-dev` (F1 Free) — image `hoso30/art-frontend:v32` |
+| Backend Web App | applied, serving | `app-art-backend-dev-art4242` on `asp-art-backend-dev` (F1 Free) — image `hoso30/art-backend:v35`. **System-Assigned identity** (Task C2a) — principal_id `8b108e0c-10af-4d3d-9a34-5f372f684064`. |
+| Backend `worker` sidecar | applied | image `hoso30/art-backend:v35`, running Celery worker + beat |
 | Backend `redis` sidecar | applied | `redis:7-alpine`, internal-only |
 | Backend `minio` sidecar | disabled | `minio_sidecar_enabled = false` since Phase 4. Sitecontainer resource still exists in `main.tf` for parity. **Never enable in Azure** — MinIO is local-dev-only. |
 | PostgreSQL Flexible Server | applied, serving | `psql-art-dev-art4242` (B_Standard_B1ms, PG 16, 32 GB, 7-day backup, **North Europe** — see PostgreSQL exception in CLAUDE.md). **Two roles in use** (Task C1): `art_admin` for Alembic + bootstrap, `art_app` (least-privilege CRUD only) for application runtime. |
@@ -27,8 +27,8 @@ Verify image tags after any apply:
 cd terraform/envs/dev
 source .env.terraform
 terraform output | grep -E "deployed_image|backend_image"
-# deployed_image = "hoso30/art-frontend:v31"
-# backend_image  = "hoso30/art-backend:v34"
+# deployed_image = "hoso30/art-frontend:v32"
+# backend_image  = "hoso30/art-backend:v35"
 ```
 
 Verify the live security stack:
@@ -69,7 +69,7 @@ All three are gitignored. Never echo their contents into chat/commits/logs. The 
 
 ## Alembic head
 
-- Current head: **`010_batch_partial_outcome`** (down-revision `008_activity_log_columns`).
+- Current head: **`012_extend_user_roles`** (down-revision `011_order_stock_deducted`).
 - Migration files on disk (`backend/alembic/versions/`):
   - `001_initial`
   - `002_var_mat_req`
@@ -79,8 +79,22 @@ All three are gitignored. Never echo their contents into chat/commits/logs. The 
   - `007_production_batches`
   - `008_activity_log_columns`
   - `010_batch_partial_outcome`  *(no 009 file — see `KNOWN_RISKS.md` #1)*
+  - `011_order_stock_deducted`
+  - `012_extend_user_roles`
 - **No `009_*` migration exists. It must not be reintroduced — see `KNOWN_RISKS.md` #1.**
 - Verify: `ls backend/alembic/versions/` and `docker-compose exec backend alembic current`.
+
+### Migration 012 details — RBAC enum extension
+
+`012_extend_user_roles.py` extends the existing `userrole` Postgres ENUM with three new values via three idempotent statements. Non-destructive — existing rows are untouched, and `IF NOT EXISTS` makes re-runs safe:
+
+```sql
+ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'director';
+ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'production_manager';
+ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'warehouse_manager';
+```
+
+`downgrade()` is a documented no-op: Postgres ENUMs do not support `ALTER TYPE … DROP VALUE`. Removing a value would require dropping the column, dropping the type, recreating both with the original two values, and restoring data — a destructive operation that is not part of the rollback path. **Migration is forward-only.** This shapes the rollback caveat — see `ROLLBACK_NOTES.md` "RBAC ENUM extension is forward-only".
 
 ### Migration 010 details
 
@@ -101,7 +115,8 @@ The boot script reads `alembic_version.version_num` and rewrites it to `006_orde
 {None, 001_initial, 002_var_mat_req, 003_user_discount,
  004_order_materials_deducted, 006_order_item_fulfillment,
  007_production_batches, 008_activity_log_columns,
- 010_batch_partial_outcome}
+ 010_batch_partial_outcome, 011_order_stock_deducted,
+ 012_extend_user_roles}
 ```
 
 Designed to recover databases stamped at a now-deleted revision (e.g. `005_production_records` or a transient `009_*`). The rewrite is silent — see `KNOWN_RISKS.md` for the caveat.
@@ -137,6 +152,45 @@ Designed to recover databases stamped at a now-deleted revision (e.g. `005_produ
 | **Stock-based production: partial outcome (Խոտան)** | **done in working tree, migration `010`** | `backend/app/production/{models,schemas,service,router}.py`, `backend/app/products/{models,schemas}.py`, `BatchControl.tsx`, `frontend/src/app/dashboard/production/page.tsx`, `VariantActions.tsx`, `frontend/src/app/dashboard/products/[id]/page.tsx` |
 | **Damaged-stock report (Խոտանի հաշվետվություն)** | **done in working tree** | `backend/app/reports/{service,router}.py`, `frontend/src/app/dashboard/reports/ReportBuilder.tsx`, `backend/tests/test_reports_damaged_stock.py` |
 | **Sales report — per-customer + per-order export** | done, deployed v34 / v31 | `backend/app/reports/{service,router}.py`, `frontend/src/app/dashboard/reports/ReportBuilder.tsx`, `backend/tests/test_reports_sales.py`. `/reports/sales` accepts optional `customer_id` and (only when `customer_id` is set) optional `order_id`. Response carries `selected_customer` and `selected_order` blocks plus a per-line `order_items` list. CSV filename is `sales_report.csv` (unfiltered), `customer-report-<slug>-<YYYY-MM-DD>.csv` (customer-only), or `customer-report-<slug>-order-<id>-<YYYY-MM-DD>.csv` (customer + order). Error codes: `customer_not_found` (404), `order_id_requires_customer_id` (422), `order_not_found` (404), `order_not_for_customer` (422). No DB migration. Frontend: customer dropdown for orders/sales reports; order dropdown appears for sales after a customer is selected and a customer-scoped report has been generated (options derived from the response's `order_items`). |
+| **RBAC — five user roles with backend authorization matrix** | done, deployed v35 / v32, migration `012_extend_user_roles` | Backend: extended `UserRole` enum (`backend/app/users/models.py`) with `director`, `production_manager`, `warehouse_manager` alongside existing `admin` / `simple_user`. Centralized role groups + `require_roles(*allowed)` dependency factory in `backend/app/dependencies.py`. Per-route guards rewritten across `customers`, `orders`, `products`, `production`, `inventory`, `reports`, `activity`, `users` routers. Service helpers `can_assign_role` / `can_manage_user` / `count_active_admins` / `is_last_active_admin` in `backend/app/users/service.py`. Pydantic `role: UserRole` rejects unknown values with 422. Self-role-change blocked (`self_role_change_denied`); self-deactivation blocked (`self_deactivation_denied`); last-active-admin demotion / deactivation blocked (`last_admin_required`); director can only assign `simple_user` (`role_assignment_denied`). Frontend: single source of truth in `frontend/src/lib/permissions.ts` (`MODULE_ACCESS`, `canAccessModule`, `canAssignRole`, `allowedRolesFor`, `ROLE_LABELS`); `requireModule(...)` / `requireRoles(...)` helpers in `frontend/src/lib/auth.ts`; sidebar / dashboard route guards filter modules per role. **Backend RBAC is authoritative** — frontend hiding is UX only; every API endpoint enforces authorization independently. Tests: `backend/tests/test_authorization_matrix.py` (51 passed, 2 skipped — last-admin guards covered directly by `test_is_last_active_admin_service_helper`). |
+
+## RBAC matrix — load-bearing (deployed v35 / v32)
+
+Five roles on `User.role`. **Backend is authoritative**: every API endpoint enforces authorization via `Depends(require_roles(*GROUP))` (or a tighter custom guard in `users/router.py`). The frontend's permissions table only hides UI elements the user couldn't use anyway.
+
+| Module | admin | director (Տնօրեն) | production_manager (Արտադրության ղեկավար) | warehouse_manager (Պահեստապետ) | simple_user (Օգտատեր) |
+|---|---|---|---|---|---|
+| `/users` | ✓ all | ✓ list/get/create/update — sees `simple_user` only | — | — | — |
+| `/orders` | ✓ | ✓ | ✓ | — | ✓ (own customer scope) |
+| `/production` | ✓ | ✓ | ✓ | — | — |
+| `/products` (mutations) | ✓ | ✓ | ✓ | — | read-only |
+| `/inventory` (write) | ✓ | ✓ | read on `/materials` | ✓ | — |
+| `/customers` | ✓ | ✓ | — | — | `/me` only |
+| `/reports/sales`, `/reports/dashboard`, `/reports/inventory`, `/reports/low-stock`, `/reports/customer-discounts` | ✓ | ✓ | — | — | — |
+| `/reports/production`, `/reports/material-consumption`, `/reports/damaged-stock` | ✓ | ✓ | ✓ | — | — |
+| `/activity-logs` | ✓ | ✓ | — | — | — |
+
+**Director restrictions (load-bearing):**
+- Director can create or update users only when the target's role is `simple_user`. Service helper `can_manage_user(actor, target)` returns `True` only when `target.role == UserRole.simple_user`.
+- Director cannot assign any role other than `simple_user`. Service helper `can_assign_role(actor, target_role)` returns `False` for all four non-`simple_user` values when actor is director.
+- Director's `GET /users` is filtered server-side via `service.list_users(..., restrict_to_role=UserRole.simple_user)` so other admins / directors / managers are not enumerated.
+- `GET /users/{id}` for a non-simple_user target returns 403 `user_management_denied`. The row is not leaked.
+
+**Self-protection guards (`backend/app/users/router.py`):**
+- Self-role-change (PATCH) → 403 `self_role_change_denied`.
+- Self-deactivation (PATCH `is_active=false` or DELETE) → 403 `self_deactivation_denied`.
+- Last-active-admin demotion (PATCH role) or deactivation (PATCH/DELETE) → 422 `last_admin_required`. Only reachable via the service helper directly because the API path is pre-empted by the self-guards (admin demoting another admin still leaves ≥ 1 active admin); covered by `test_is_last_active_admin_service_helper`.
+
+**Smoke verification (deployed v35 / v32, 2026-05-02):**
+- `GET /ready` → HTTP 200
+- `GET /` (frontend) → HTTP 200
+- `POST /api/v1/auth/login` (admin) → HTTP 200, `role:"admin"`
+- `GET /api/v1/users?limit=20` → returned 7 rows including the original admin/simple_user accounts intact
+- Frontend bundle contains the three new Armenian role labels: `Տնօրեն`, `Արտադրության ղեկավար`, `Պահեստապետ`
+- Migration 012 applied (DB now contains a row with `role='director'`, only possible if the ENUM was extended)
+- Plan summary: `0 to add, 3 to change, 0 to destroy` — only the three Web App / sidecontainer image references. No protected-resource changes.
+
+**Smoke-test canary**: User ID 7 (`art@art.am`, role `director`) was created intentionally as a smoke-test canary right after v35 came online. This is the only non-original-role row in the live DB. Treat as a known canary; do not delete without coordination. The canary's existence is what makes the rollback caveat (below) bite — see `ROLLBACK_NOTES.md`.
 
 ## Partial-outcome (Խոտան) semantics — load-bearing
 

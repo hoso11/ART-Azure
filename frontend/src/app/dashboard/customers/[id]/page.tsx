@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireModule } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { Customer } from "@/types";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
@@ -13,7 +13,7 @@ export default async function CustomerDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requireAdmin();
+  await requireModule("customers");
   const { id } = await params;
   const customer = await serverGet<Customer>(`/customers/${id}`);
 

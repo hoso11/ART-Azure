@@ -106,6 +106,72 @@ docker run --rm "$TAG" sh -c 'ls /app/.next/static/css/*.css | head -1'
 
 All three checks must pass before pushing the tag to Docker Hub or bumping `frontend_image_tag` in Terraform.
 
+## RBAC ENUM extension is forward-only (v35 / v32, migration `012_extend_user_roles`)
+
+Migration `012_extend_user_roles` extended the existing `userrole` Postgres ENUM with three new values via three idempotent statements:
+
+```sql
+ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'director';
+ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'production_manager';
+ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'warehouse_manager';
+```
+
+`downgrade()` is a documented no-op. **Postgres does not support `ALTER TYPE … DROP VALUE`** — once a value is in the type, removing it requires recreating the type and column, which is destructive (drop column → drop type → recreate type with original two values → recreate column → restore data).
+
+### Rollback rule — read before flipping `backend_image_tag` below `v35`
+
+A rollback to backend `:v34` (or any pre-v35 image) is **only data-safe if no `users.role` row holds one of the three new values.** v34's Pydantic `UserRole` enum and SQLAlchemy `Enum(UserRole)` mapping refuse to materialize unknown values. Symptoms of rolling back without preparing the DB:
+
+- Login still works (token decode does not consult the DB enum).
+- `GET /api/v1/users` raises 500 on the row with the unknown role.
+- The users page errors out.
+
+**Mandatory DB prep before rollback.** Connect via the `art_admin` DSN (`DATABASE_URL_SYNC`) and demote any non-original-role users back to `simple_user`:
+
+```sql
+UPDATE users SET role = 'simple_user'
+WHERE role IN ('director', 'production_manager', 'warehouse_manager');
+```
+
+Verify with `SELECT id, email, role FROM users ORDER BY id;` — only `admin` / `simple_user` should appear. **Then** flip `backend_image_tag` in `terraform/envs/dev/terraform.tfvars` and apply.
+
+### Live state snapshot (2026-05-02)
+
+The live DB currently has **one** non-original-role row:
+
+| ID | Email | Role | Notes |
+|---|---|---|---|
+| 7 | `art@art.am` | `director` | Smoke-test canary, intentionally created right after v35 came online to verify the new role works end-to-end. |
+
+Any forced rollback today must include the demote step above. Don't forget the canary.
+
+### Detection commands (run before any rollback below v35)
+
+```bash
+# 1. Read the live role distribution. Anything other than admin / simple_user means
+#    a UPDATE is required before the rollback.
+PGPASSWORD="$(terraform output -raw postgres_admin_password)" psql \
+  "host=$(terraform output -raw postgres_fqdn) port=5432 dbname=art_manufacturing \
+   user=art_admin sslmode=require" \
+  -c "SELECT role, COUNT(*) FROM users GROUP BY role ORDER BY role;"
+
+# 2. Confirm the ENUM has the new values (purely informational — they cannot be removed).
+PGPASSWORD="$(terraform output -raw postgres_admin_password)" psql \
+  "host=$(terraform output -raw postgres_fqdn) port=5432 dbname=art_manufacturing \
+   user=art_admin sslmode=require" \
+  -c "SELECT enumlabel FROM pg_enum
+      JOIN pg_type ON pg_enum.enumtypid = pg_type.oid
+      WHERE pg_type.typname = 'userrole'
+      ORDER BY enumlabel;"
+# Expected output includes: admin, director, production_manager, simple_user, warehouse_manager.
+```
+
+### What must NOT be restored (RBAC forward-only addendum)
+
+- Do not delete `backend/alembic/versions/012_extend_user_roles.py`.
+- Do not propose a new migration that drops or recreates the `userrole` type to remove the three new values without explicit user approval and a documented data-preservation plan (`pg_dump`, parallel column, cutover).
+- Do not narrow `UserRole` in `backend/app/users/models.py` back to two values — the model would reject any DB row using the new values, breaking `GET /users` even if no app code uses the new roles.
+
 ## If a "production stage rewrite" is genuinely needed in the future
 
 Do not silently restore the rolled-back code. Treat it as a new design task:

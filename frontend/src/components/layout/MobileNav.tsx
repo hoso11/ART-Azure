@@ -3,9 +3,10 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Sidebar } from "./Sidebar";
+import type { UserRole } from "@/types/models";
 
 interface MobileNavProps {
-  role: string;
+  role: UserRole;
 }
 
 export function MobileNav({ role }: MobileNavProps) {

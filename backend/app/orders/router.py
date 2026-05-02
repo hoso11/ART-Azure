@@ -4,7 +4,13 @@ from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import require_admin, require_authenticated
+from app.dependencies import (
+    require_admin,
+    require_authenticated,
+    require_roles,
+    BUSINESS_MANAGER,
+    ORDERS_VIEW,
+)
 from app.orders import service, schemas
 from app.orders.models import Order
 from app.users.models import User, UserRole
@@ -34,7 +40,7 @@ async def list_orders(
     customer_id: int | None = Query(None),
     filter: str | None = Query(None, pattern="^(active|delayed)$"),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_authenticated),
+    current_user: User = Depends(require_roles(*ORDERS_VIEW)),
 ):
     # Simple users can only see their own orders
     if current_user.role.value == "simple_user":
@@ -54,7 +60,7 @@ async def list_orders(
 @router.get("/stats")
 async def get_order_stats(
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     return await service.get_order_stats(db)
 
@@ -63,7 +69,7 @@ async def get_order_stats(
 async def get_order(
     order_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_authenticated),
+    current_user: User = Depends(require_roles(*ORDERS_VIEW)),
 ):
     order = await service.get_order_by_id(db, order_id)
 
@@ -80,7 +86,7 @@ async def create_order(
     data: schemas.OrderCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_authenticated),
+    current_user: User = Depends(require_roles(*ORDERS_VIEW)),
 ):
     # Simple users can only create orders for their own customer
     if current_user.role == UserRole.simple_user:
@@ -121,7 +127,7 @@ async def update_order(
     data: schemas.OrderUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_admin: User = Depends(require_admin),
+    current_admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     existing = await service.get_order_by_id(db, order_id)
     old_snapshot = _order_snapshot(existing)
@@ -161,7 +167,7 @@ async def update_order_status(
     data: schemas.OrderStatusUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_admin: User = Depends(require_admin),
+    current_admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     existing = await service.get_order_by_id(db, order_id)
     old_status = existing.status.value if hasattr(existing.status, "value") else existing.status
@@ -189,7 +195,7 @@ async def delete_order(
     order_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     existing = await service.get_order_by_id(db, order_id)
     snapshot = _order_snapshot(existing)
@@ -207,7 +213,7 @@ async def add_order_item(
     data: schemas.OrderItemCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     item = await service.add_order_item(db, order_id, **data.model_dump())
     await activity_service.log_activity(
@@ -228,7 +234,7 @@ async def delete_order_item(
     item_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
     await service.delete_order_item(db, item_id)
     await activity_service.log_activity(

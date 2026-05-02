@@ -6,27 +6,33 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { FormField, Input, Select } from "@/components/ui/FormField";
 import { Customer } from "@/types";
+import type { UserRole } from "@/types/models";
+import { allowedRolesFor, ROLE_LABELS } from "@/lib/permissions";
 
 interface CreateUserButtonProps {
   customers: Customer[];
+  actorRole: UserRole;
 }
 
-export function CreateUserButton({ customers }: CreateUserButtonProps) {
+export function CreateUserButton({ customers, actorRole }: CreateUserButtonProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const allowed = allowedRolesFor(actorRole);
+  const defaultRole: UserRole = allowed.includes("simple_user") ? "simple_user" : (allowed[0] ?? "simple_user");
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState("simple_user");
+  const [role, setRole] = useState<UserRole>(defaultRole);
   const [customerId, setCustomerId] = useState("");
   const [discountPercent, setDiscountPercent] = useState("0");
 
   const resetForm = () => {
     setEmail("");
     setPassword("");
-    setRole("simple_user");
+    setRole(defaultRole);
     setCustomerId("");
     setDiscountPercent("0");
     setError("");
@@ -91,9 +97,10 @@ export function CreateUserButton({ customers }: CreateUserButtonProps) {
           </FormField>
 
           <FormField label="Դեր" required>
-            <Select value={role} onChange={(e) => setRole(e.target.value)}>
-              <option value="simple_user">Օգտատեր</option>
-              <option value="admin">Ադմին</option>
+            <Select value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
+              {allowed.map((r) => (
+                <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+              ))}
             </Select>
           </FormField>
 

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import require_admin, require_authenticated
+from app.dependencies import require_admin, require_authenticated, require_roles, CUSTOMER_MANAGEMENT
 from app.customers import service, schemas
 from app.customers.models import Customer
 from app.users.models import User
@@ -43,7 +43,7 @@ async def list_customers(
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     search: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*CUSTOMER_MANAGEMENT)),
 ):
     customers, total = await service.list_customers(db, page, limit, sort_by, sort_order, search)
     return schemas.CustomerListResponse(
@@ -58,7 +58,7 @@ async def list_customers(
 async def get_customer(
     customer_id: int,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*CUSTOMER_MANAGEMENT)),
 ):
     customer = await service.get_customer_by_id(db, customer_id)
     return schemas.CustomerResponse.model_validate(customer)
@@ -69,7 +69,7 @@ async def create_customer(
     data: schemas.CustomerCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*CUSTOMER_MANAGEMENT)),
 ):
     customer = await service.create_customer(db, **data.model_dump())
     await activity_service.log_activity(
@@ -86,7 +86,7 @@ async def update_customer(
     data: schemas.CustomerUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*CUSTOMER_MANAGEMENT)),
 ):
     existing = await service.get_customer_by_id(db, customer_id)
     old_snapshot = _customer_snapshot(existing)
@@ -108,7 +108,7 @@ async def delete_customer(
     customer_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*CUSTOMER_MANAGEMENT)),
 ):
     existing = await service.get_customer_by_id(db, customer_id)
     snapshot = _customer_snapshot(existing)

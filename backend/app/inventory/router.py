@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import require_admin
+from app.dependencies import require_roles, INVENTORY_MANAGER, PRODUCTION_INVENTORY_READ
 from app.inventory import service, schemas
 from app.users.models import User
 from app.activity import service as activity_service
@@ -29,7 +29,7 @@ async def list_materials(
     sort_order: str = Query("asc", pattern="^(asc|desc)$"),
     search: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _viewer: User = Depends(require_roles(*PRODUCTION_INVENTORY_READ)),
 ):
     materials, total = await service.list_materials(db, page, limit, sort_by, sort_order, search)
     return schemas.MaterialListResponse(
@@ -43,7 +43,7 @@ async def list_materials(
 @router.get("/materials/low-stock", response_model=list[schemas.MaterialResponse])
 async def get_low_stock(
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _viewer: User = Depends(require_roles(*PRODUCTION_INVENTORY_READ)),
 ):
     materials = await service.get_low_stock_materials(db)
     return [schemas.MaterialResponse.model_validate(m) for m in materials]
@@ -53,7 +53,7 @@ async def get_low_stock(
 async def get_material(
     material_id: int,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _viewer: User = Depends(require_roles(*PRODUCTION_INVENTORY_READ)),
 ):
     material = await service.get_material_by_id(db, material_id)
     return schemas.MaterialResponse.model_validate(material)
@@ -64,7 +64,7 @@ async def create_material(
     data: schemas.MaterialCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*INVENTORY_MANAGER)),
 ):
     material = await service.create_material(db, **data.model_dump())
     await activity_service.log_activity(
@@ -81,7 +81,7 @@ async def update_material(
     data: schemas.MaterialUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*INVENTORY_MANAGER)),
 ):
     existing = await service.get_material_by_id(db, material_id)
     old_snapshot = _material_snapshot(existing)
@@ -102,7 +102,7 @@ async def delete_material(
     material_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*INVENTORY_MANAGER)),
 ):
     existing = await service.get_material_by_id(db, material_id)
     snapshot = _material_snapshot(existing)
@@ -125,7 +125,7 @@ async def list_movements(
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     material_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_roles(*INVENTORY_MANAGER)),
 ):
     movements, total = await service.list_stock_movements(db, page, limit, sort_by, sort_order, material_id)
     return schemas.StockMovementListResponse(
@@ -141,7 +141,7 @@ async def create_movement(
     data: schemas.StockMovementCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_roles(*INVENTORY_MANAGER)),
 ):
     movement = await service.create_stock_movement(
         db,

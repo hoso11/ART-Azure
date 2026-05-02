@@ -1,6 +1,8 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { AuthResponse } from "@/types";
+import type { UserRole } from "@/types/models";
+import { canAccessModule, type Module } from "@/lib/permissions";
 
 const INTERNAL_API_URL = process.env.INTERNAL_API_URL || "http://backend:8000";
 
@@ -34,6 +36,25 @@ export async function requireAuth(): Promise<AuthResponse> {
 export async function requireAdmin(): Promise<AuthResponse> {
   const session = await requireAuth();
   if (session.role !== "admin") {
+    redirect("/dashboard");
+  }
+  return session;
+}
+
+// New: whitelist by role. Use for pages that admin / director / managers
+// share. Falls through to /dashboard if the actor lacks any allowed role.
+export async function requireRoles(...allowed: UserRole[]): Promise<AuthResponse> {
+  const session = await requireAuth();
+  if (!allowed.includes(session.role)) {
+    redirect("/dashboard");
+  }
+  return session;
+}
+
+// New: gate a page on the per-module access table (mirrors backend matrix).
+export async function requireModule(module: Module): Promise<AuthResponse> {
+  const session = await requireAuth();
+  if (!canAccessModule(session.role, module)) {
     redirect("/dashboard");
   }
   return session;

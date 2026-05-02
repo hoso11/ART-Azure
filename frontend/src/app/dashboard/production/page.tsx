@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth";
+import { requireModule } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, ProductionStage, ProductionBatch } from "@/types";
 import { Card, CardContent } from "@/components/ui/Card";
@@ -24,7 +24,7 @@ export default async function ProductionPage({
 }: {
   searchParams: Promise<{ page?: string; status?: string; filter?: string }>;
 }) {
-  await requireAdmin();
+  await requireModule("production");
   const params = await searchParams;
   const page = parseInt(params.page || "1");
   const filter = params.filter === "in_progress" ? "in_progress" : "";

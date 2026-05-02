@@ -41,7 +41,87 @@ State of each in-flight workstream. "Done" means landed in the current commit on
 - Migration `007_production_batches`.
 - Tests in `backend/tests/test_production_batches.py` cover the deduction-once and stock-once invariants.
 
-## Done (deployed v34 / v31, this commit)
+## Done (deployed v35 / v32, this commit)
+
+### RBAC — five user roles with backend authorization matrix
+
+Five roles on `User.role`: `admin`, `director`, `production_manager`, `warehouse_manager`, `simple_user`. **Backend is authoritative** — every API endpoint enforces authorization via `Depends(require_roles(*GROUP))` from `backend/app/dependencies.py`. The frontend's `MODULE_ACCESS` table only hides UI elements the user couldn't use anyway.
+
+**Migration:** `012_extend_user_roles` extends the existing `userrole` Postgres ENUM with the three new values via three idempotent `ALTER TYPE userrole ADD VALUE IF NOT EXISTS …` statements. **Non-destructive**: existing `admin` / `simple_user` rows untouched. Down-revision `011_order_stock_deducted`. Whitelisted in `backend/entrypoint.sh`.
+
+**Rollback caveat:** the ENUM extension is forward-only. Postgres does not support `ALTER TYPE … DROP VALUE`, so a code-rollback to v34 / v31 (or any pre-RBAC backend) is only safe if no `users.role` row holds `director` / `production_manager` / `warehouse_manager`. Live DB currently has user id 7 (`art@art.am`, role `director`) as a smoke-test canary, so any forced rollback today must first run:
+```sql
+UPDATE users SET role = 'simple_user'
+WHERE role IN ('director', 'production_manager', 'warehouse_manager');
+```
+against the `art_admin` DSN. See `ROLLBACK_NOTES.md` "RBAC ENUM extension is forward-only" and `KNOWN_RISKS.md` #14.
+
+**Per-role expected behaviour (full matrix in `CURRENT_STATE.md` "RBAC matrix — load-bearing"):**
+
+- **admin** — full access. Can manage all roles. Last-active-admin protection (`last_admin_required` 422) prevents demotion or deactivation that would leave zero active admins.
+- **director / Տնօրեն** — manages business modules (orders, production, products, inventory, customers, reports, activity). On `/users`, sees / creates / updates **only `simple_user` accounts** (server-filtered via `restrict_to_role=UserRole.simple_user`). Cannot create or promote anyone to `admin` / `director` / `production_manager` / `warehouse_manager` — guard returns 403 `role_assignment_denied`. `GET /users/{id}` for a non-`simple_user` target returns 403 `user_management_denied`.
+- **production_manager / Արտադրության ղեկավար** — manages `/orders`, `/production`, `/products`. Read-only on `/inventory/materials`. Allowed reports: `/reports/production`, `/reports/material-consumption`, `/reports/damaged-stock`. Denied: `/users`, `/customers`, sales / dashboard / inventory / low-stock / customer-discounts reports, `/activity-logs`.
+- **warehouse_manager / Պահեստապետ** — manages `/inventory` only. All other dashboard modules return 403.
+- **simple_user / Օգտատեր** — existing behavior preserved. Lists only own-customer-scoped orders, browses catalog, manages own account.
+
+**Backend code structure:**
+- `backend/app/dependencies.py` — role group constants (`ADMIN_ONLY`, `USER_MANAGEMENT`, `BUSINESS_MANAGER`, `INVENTORY_MANAGER`, `PRODUCTION_INVENTORY_READ`, `CUSTOMER_MANAGEMENT`, `REPORT_MANAGEMENT`, `PRODUCTION_REPORTS`, `ACTIVITY_VIEW`, `ORDERS_VIEW`, `PRODUCTS_VIEW`) + `require_roles(*allowed)` factory.
+- `backend/app/users/service.py` — `can_assign_role(actor, target_role)`, `can_manage_user(actor, target)`, `count_active_admins(db)`, `is_last_active_admin(db, user)`, and `list_users(..., restrict_to_role=)`.
+- `backend/app/users/router.py` — full rewrite: `_restrict_for(actor)`, `_ensure_can_manage`, `_ensure_can_assign_role`, self-role-change / self-deactivation / last-admin guards in PATCH and DELETE.
+- `backend/app/users/schemas.py` — `role: UserRole` (Pydantic enum) on `UserCreate` / `UserUpdate` / `UserResponse`. Unknown role strings rejected with 422 before route runs.
+- All other routers updated to use the new role groups (`customers`, `orders`, `products`, `production`, `inventory`, `reports`, `activity`).
+
+**Frontend code structure:**
+- `frontend/src/lib/permissions.ts` — single source of truth: `MODULE_ACCESS` table, `canAccessModule`, `canAssignRole`, `allowedRolesFor`, `ROLE_LABELS` (`Ադմին` / `Տնօրեն` / `Արտադրության ղեկավար` / `Պահեստապետ` / `Օգտատեր`).
+- `frontend/src/lib/auth.ts` — added `requireRoles(...allowed)` and `requireModule(module)` helpers alongside the existing `requireAdmin` / `requireAuth`.
+- `frontend/src/types/models.ts` — `UserRole` union type union; `User.role: UserRole`.
+- `frontend/src/components/layout/{Sidebar,TopHeader,MobileNav}.tsx` — nav and labels driven by `canAccessModule` / `ROLE_LABELS`.
+- All dashboard route guards migrated from binary `requireAdmin()` to `requireModule(...)` / `requireRoles(...)`.
+- `frontend/src/app/dashboard/users/{page,UserActions,EditUserForm}.tsx` — role `<Select>` options computed from `allowedRolesFor(actor)`; the role select on the edit form is disabled when `actor.id === user.id` (self-role-change is blocked server-side, but disabling the field surfaces this in the UI with a hint).
+
+**Tests:** `backend/tests/test_authorization_matrix.py` — 51 passed, 2 skipped. Skips are documented unreachable-via-API last-admin scenarios; the underlying guard is exercised directly by `test_is_last_active_admin_service_helper`. Covers: enum membership, Pydantic 422 on unknown role, director's role-creation matrix, director list/get/update isolation, self-role-change & self-deactivation blocked, PM module access matrix (parametrized), WM module access matrix (parametrized), director full module access (parametrized), simple_user behavior preserved, plus direct unit tests on `can_assign_role` / `can_manage_user`.
+
+**Smoke verification (deployed 2026-05-02):**
+
+- Backend `/ready` → HTTP 200; frontend `/` → HTTP 200.
+- `POST /api/v1/auth/login` (admin) → 200, `role:"admin"`.
+- `GET /api/v1/users?limit=20` → 7 rows; existing admin and simple_user accounts intact.
+- Frontend bundle (`hoso30/art-frontend:v32`) contains the three new Armenian labels (`Տնօրեն`, `Արտադրության ղեկավար`, `Պահեստապետ`) in compiled chunks.
+- Migration 012 applied: DB now contains `users.role='director'` (id 7), only possible if the `userrole` ENUM was extended.
+- Plan summary on apply: `0 to add, 3 to change, 0 to destroy`. No protected-resource changes (PostgreSQL server / database / Storage Account / container / management locks all untouched).
+
+#### Rollback (RBAC v35 / v32 → previous live)
+
+The previous live tags `v34` (backend) / `v31` (frontend) are still in the registry. **The DB-side prep is mandatory if any non-original-role user exists.**
+
+1. **DB preparation (mandatory if non-original-role users exist).** Connect via the `art_admin` DSN and demote the canary (and any other manager-tier rows) back to `simple_user`:
+   ```sql
+   UPDATE users SET role = 'simple_user'
+   WHERE role IN ('director', 'production_manager', 'warehouse_manager');
+   ```
+   Verify: `SELECT id, email, role FROM users ORDER BY id;` should show only `admin` / `simple_user`.
+2. Edit `terraform/envs/dev/terraform.tfvars`:
+   ```
+   backend_image_tag  = "v34"
+   frontend_image_tag = "v31"
+   ```
+3. From `terraform/envs/dev/`:
+   ```bash
+   source .env.terraform
+   terraform plan -out=tfplan
+   ```
+   Expected plan: **0 to add, 3 to change, 0 to destroy** — `azapi_resource.backend_main`, `azapi_resource.backend_worker[0]`, `azurerm_linux_web_app.frontend` revert to v34 / v31. Verify the plan shows **no** changes to the four protected data resources or the two `azurerm_management_lock` resources.
+4. `terraform apply tfplan` (~40–80 s).
+5. Smoke check:
+   ```bash
+   curl -sS -o /dev/null -w "%{http_code}\n" "$(terraform output -raw frontend_url)/"
+   curl -sS -o /dev/null -w "%{http_code}\n" "$(terraform output -raw backend_url)/ready"
+   terraform output | grep -E "deployed_image|backend_image"  # → v31 / v34
+   ```
+
+**No DB migration rollback.** The ENUM extension is forward-only — `012_extend_user_roles.downgrade()` is a documented no-op. The rollback strategy is to leave the ENUM extended and demote any rows that use the new values, not to remove the values from the type.
+
+## Done (deployed v34 / v31, prior commit)
 
 ### Sales report — per-customer + per-order filtering and export
 
@@ -196,7 +276,7 @@ Until then, treat order-based damaged production as **off the roadmap** — do n
 
 ### Image tag history (Azure deployment)
 
-Live: `art-frontend:v24`, `art-backend:v30`. Blacklisted in `terraform/envs/dev/variables.tf` validation:
+Live: `art-frontend:v32`, `art-backend:v35`. Blacklisted in `terraform/envs/dev/variables.tf` validation:
 
 | Tag | Reason retired |
 |---|---|
@@ -207,8 +287,11 @@ Live: `art-frontend:v24`, `art-backend:v30`. Blacklisted in `terraform/envs/dev/
 | `art-frontend:v22` and `v23` | Built from Git Bash on Windows without `MSYS_NO_PATHCONV=1`; MSYS rewrote `--build-arg NEXT_PUBLIC_API_URL=/api/v1` to `C:/Program Files/Git/api/v1`, which webpack inlined into every `clientFetch` call. Every browser-side fetch threw `TypeError: Failed to fetch`. SSR was unaffected. v22 was the symptomless variant; v23 surfaced the bug because its modal's defensive logic exposed it. See `KNOWN_RISKS.md` #8. |
 
 Backend tag lineage (live progression):
-- `v21` → `v25` (Task A) → `v28` (Task B) → `v29` (Task C1) → `v30` (Task C2a/b — current).
-- v25, v28, v29 are retired but not blacklisted; rolling back to one of them to triage a new regression is permitted (would temporarily restore connection-string auth + admin-as-runtime-DB-user, both undesirable).
+- `v21` → `v25` (Task A) → `v28` (Task B) → `v29` (Task C1) → `v30` (Task C2a/b) → `v31` (orders dropdown UX) → `v32` (partial production batches) → `v33` (sales per-customer) → `v34` (sales per-order) → **`v35` (RBAC five roles, migration `012_extend_user_roles`) — current**.
+- v25, v28, v29, v30, v31, v32, v33, v34 are retired but not blacklisted. Rolling back to a pre-v35 tag is conditional — see "RBAC ENUM extension is forward-only" in `KNOWN_RISKS.md` #14 and `ROLLBACK_NOTES.md`.
+
+Frontend tag lineage (live progression):
+- `v24` (post-MSYS-fix baseline) → `v25`–`v27` (orders UX) → `v28` (production page) → `v29` (per-customer reports) → `v30` (limit fix) → `v31` (per-order reports) → **`v32` (RBAC permissions, sidebar/route/user-form gating) — current**.
 
 When publishing a new frontend tag from Git Bash on Windows, **always** set `MSYS_NO_PATHCONV=1` and verify the bundle is clean before pushing — see CLAUDE.md "Building Docker images on Windows / Git Bash" for the verification command.
 
