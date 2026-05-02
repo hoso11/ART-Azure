@@ -9,6 +9,8 @@ Hard rules for any future change in this repo. These exist because each one corr
 3. **No enum rename, drop, or value reordering on `stagename` / `stagestatus`** (or any other Postgres enum). These are the exact failure mode that broke migration 009. If a value must change, propose a parallel column + backfill + cutover migration over multiple revisions, not an in-place enum alter.
 4. **New revision id must be added to the entrypoint whitelist** in `backend/entrypoint.sh` in the same commit as the migration file. Otherwise the boot guard will silently downgrade fresh databases.
 5. **Test new migrations against Postgres**, not just SQLite. `make up` then `make migrate` against a clean volume reproduces production behavior; `make test` does not.
+5a. **Application runtime uses `art_app` (CRUD only, Task C1).** `art_admin` is reserved for Alembic + `scripts/bootstrap_db_user.py` which run from `backend/entrypoint.sh` before uvicorn starts. Do **not** wire app code (FastAPI handlers, services, Celery tasks) to `DATABASE_URL_SYNC` or any other admin-credentialed DSN. New mutations + new tables must remain accessible to `art_app` via the existing grants — `bootstrap_db_user.py` runs `GRANT … ON ALL TABLES/SEQUENCES … IN SCHEMA public` and `ALTER DEFAULT PRIVILEGES`, so newly-created objects inherit access automatically. If a future feature genuinely needs DDL at runtime (rare — almost always belongs in an Alembic migration instead), state the case in writing and get explicit approval before granting `art_app` more privileges or before reverting to admin DSNs.
+5b. **Do not edit `backend/scripts/bootstrap_db_user.py` to skip the gate, hardcode a password, or introduce string-formatted SQL.** The script uses `psycopg2.sql.Identifier` / `psycopg2.sql.Literal` to compose every `CREATE ROLE` / `ALTER ROLE` / `GRANT` / `REVOKE` statement; reverting to `f"CREATE ROLE {user}"` opens SQL injection on the password field. Tests in `backend/tests/test_db_bootstrap.py` lock down the role name (`art_app`), the password validator, and the absence of hardcoded password literals — keep them green.
 
 ## Frontend strings
 
@@ -34,6 +36,22 @@ Hard rules for any future change in this repo. These exist because each one corr
 15. **Do not pull, tag, or publish the `hoso30/art-backend:v13` Docker image.** It contains the failed migration 009. Always build from the current commit with `--no-cache`.
 16. **Do not edit `backend/entrypoint.sh` migration-guard logic** beyond extending the whitelist. The retry loop, the silent-rewrite-to-006 fallback, and the SQL itself are load-bearing for already-deployed databases. Larger changes need a discussion of every DB currently in the wild.
 17. **Do not delete or rename existing migration files.** If a revision must be retired, the retirement plan is its own task and must include a story for every database currently stamped at that revision.
+17a. **Sensitive files — never commit, never echo:**
+   - `terraform/envs/dev/.env.terraform` — Service Principal credentials. Subscription-level access.
+   - `terraform/envs/dev/terraform.tfvars` — `backend_secret_key` (JWT key) + `enable_storage_role_assignment`.
+   - `terraform/envs/dev/terraform.tfstate` (and `.backup`) — Postgres admin password, `art_app` runtime password, storage account access keys (still embedded in state even with `shared_access_key_enabled = false`).
+
+   All three are gitignored. If any appears in `git status`, stop and verify `.gitignore` before any commit. Never `cat` their contents into a chat, commit message, or log. The `storage_account_connection_string` Terraform output is marked `sensitive` — treat as confidential even though shared-key auth is disabled at the data plane. **Future hardening:** remove the `storage_account_connection_string` output entirely if no workflow needs it.
+
+## Storage / Managed Identity (Tasks C2a + C2b)
+
+17b. **The backend's Storage Managed Identity is the only blob auth path. Do not undo it.** Specifically:
+- Do not remove `identity { type = "SystemAssigned" }` from `azurerm_linux_web_app.backend`.
+- Do not delete `azurerm_role_assignment.backend_blob_data_contributor[0]` or change its `role_definition_name` to a weaker role.
+- Do not flip `azurerm_storage_account.images.shared_access_key_enabled` back to `true` for any reason except a documented break-glass operation (e.g. running `azcopy` from a workstation), and only with explicit user approval; flip back to `false` immediately after.
+- Do not re-add `AZURE_STORAGE_CONNECTION_STRING` to backend `app_settings`. The adapter prefers MI when `AZURE_STORAGE_ACCOUNT_URL` is set, but leaving the connection string in `app_settings` re-introduces a credential surface and is a regression even if the data plane refuses it.
+17c. **Do not change `enable_storage_role_assignment` from `true` to `false`** in the dev `terraform.tfvars`. That would plan a destroy of the role assignment, breaking the running backend's blob auth. The `false` default in `variables.tf` is for the bootstrap-on-existing-Web-App workaround and applies to greenfield envs only.
+17d. **Do not remove `storage_use_azuread = true`** from `provider "azurerm"` in `providers.tf` while `shared_access_key_enabled = false`. The pairing is required — see `handoff/KNOWN_RISKS.md` "storage_use_azuread + shared-key disabled".
 
 ## Critical Data Protection (PostgreSQL + Azure Blob Storage)
 
@@ -73,35 +91,54 @@ The "Postgres → West Europe" recreate sequence (only foreseen scenario for leg
 
 Each step is its own user approval; "go ahead with the migration" does not extend to all of them.
 
-### Service Principal role for Terraform — Contributor by default, Owner only when changing locks
+### Service Principal role for Terraform — current state and downgrade requirements
 
-The SP that authenticates Terraform (`ARM_CLIENT_ID` from `terraform/envs/dev/.env.terraform`) holds **Contributor** at subscription scope by default. That is sufficient for **all day-to-day Terraform operations**:
+The SP that authenticates Terraform (`ARM_CLIENT_ID` from `terraform/envs/dev/.env.terraform`) currently holds **Owner** at subscription scope. The elevation history:
 
-- bumping `frontend_image_tag` / `backend_image_tag`
+1. **Originally** Contributor — sufficient for steady-state Phase 1–4 operations.
+2. **Elevated to Owner during Task C2a** to grant itself permission to create the `Storage Blob Data Contributor` role assignment (`Microsoft.Authorization/roleAssignments/write`).
+3. **Retained as Owner after Task C2b** because `provider "azurerm" { storage_use_azuread = true }` in `providers.tf` requires the SP to have a Storage data-plane role on `azurerm_storage_account.images` to read sub-properties (`queue_properties`, etc.) on every plan. Owner satisfies this transitively.
+
+**Downgrading the SP back to Contributor — what breaks and how to keep things working:**
+
+Day-to-day Terraform operations that work as Contributor:
+
+- bumping `frontend_image_tag` / `backend_image_tag` (sidecar image fields)
 - editing `app_settings` on either Web App
 - adding/removing Postgres firewall rules
-- rotating the Postgres admin password (`random_password.postgres_admin` regen)
-- reading the existing locks (`terraform plan` refresh)
+- rotating the Postgres admin password and the `art_app` runtime password
 - creating new resources inside `rg-art-dev` from the free-tier allowlist
 
-Contributor **does NOT** include `Microsoft.Authorization/locks/*`, so it cannot create, modify, or remove `azurerm_management_lock` resources. Apply will fail with `403 AuthorizationFailed` on any lock mutation.
+What breaks if the SP loses Owner without a replacement Storage data-plane role:
 
-**When Owner (or an equivalent narrow custom role with `Microsoft.Authorization/locks/*`) is required:**
+- Every `terraform plan` 403s on `KeyBasedAuthenticationNotPermitted` while the provider tries to read storage account `queue_properties` / `share_properties` / `static_website` / `blob_properties` via shared keys (which are disabled). See `handoff/KNOWN_RISKS.md` "storage_use_azuread + SP downgrade".
+- All apply paths are blocked because plan can't complete.
 
-- Adding a new `azurerm_management_lock` to any resource.
+**To downgrade safely:**
+
+1. Portal → Storage account `startdevimgsart4242` → Access control (IAM) → grant the SP **`Storage Blob Data Owner`** (or `Storage Blob Data Contributor`) at the storage account scope. This survives Owner revocation.
+2. Wait ~1 min for propagation; verify with a `terraform plan` (should return clean).
+3. Portal → Subscription → IAM → revoke Owner, leaving Contributor + the explicit storage role.
+
+**When Owner (or an equivalent narrow custom role with the right permissions) is required again:**
+
+- Adding a new `azurerm_management_lock` to any resource (`Microsoft.Authorization/locks/*`).
 - Modifying a lock's `notes`, `lock_level`, `name`, or `scope`.
 - Removing a lock (e.g. step 2 of the "PostgreSQL → West Europe" recreate procedure above).
-- The first-time creation of `postgres_no_delete` and `storage_no_delete` (already done; not relevant unless they need to be recreated).
+- Creating, deleting, or modifying `azurerm_role_assignment` resources (`Microsoft.Authorization/roleAssignments/*`). The C2a role assignment is already in place; recreation would only be needed if Terraform state for it were lost.
 
-**Procedure when lock changes are needed:**
+**Procedure when these changes are needed:**
 
-1. Portal → Subscription → Access control (IAM) → grant the SP **Owner** at subscription scope (or grant a narrower custom role with `Microsoft.Authorization/locks/read,write,delete`). Wait ~1 min for propagation.
+1. Portal → Subscription → Access control (IAM) → grant the SP **Owner** (or a narrower custom role with the required permissions). Wait ~1 min.
 2. Run the Terraform change.
-3. Portal → IAM → revoke the elevated role, leaving the SP back at Contributor only.
+3. Portal → IAM → revoke Owner. Verify Contributor + Storage Blob Data Owner remain.
 
-The locks already in Azure remain protective regardless of what role the SP holds — they're stored ARM resources, independent of the credential that created them. The running app is also unaffected by the SP's role (backend uses Postgres password + `AZURE_STORAGE_CONNECTION_STRING`, neither of which depends on RBAC).
+The locks and role assignments already in Azure remain protective regardless of what role the SP holds — they're stored ARM resources, independent of the credential that created them. The running app is also unaffected by the SP's role:
 
-Document any role elevation event in the handoff folder so future agents know it happened.
+- Postgres: backend authenticates as `art_app` with the runtime password (`random_password.art_app_db.result`) — independent of any Azure RBAC.
+- Blob Storage: backend authenticates via System-Assigned MI's bearer token + the existing `Storage Blob Data Contributor` role assignment — independent of the SP.
+
+**Document any role elevation event in this section so future agents know it happened.** The current state (Owner since C2a, retained for storage_use_azuread reads) should be reviewed periodically; if the storage data-plane role is granted explicitly, downgrade Owner and update this doc.
 
 ## Terraform / deployment
 

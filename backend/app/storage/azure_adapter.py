@@ -1,14 +1,26 @@
 """Azure Blob Storage adapter.
 
-Active when STORAGE_BACKEND=azure. Connection string and container name are
-injected via Azure App Settings (AZURE_STORAGE_CONNECTION_STRING,
-AZURE_STORAGE_CONTAINER) — Terraform wires both from the storage account
-resource. Container is private; image bytes reach the browser via the
-backend proxy at /api/v1/products/images/file/{key}, never directly.
+Active when STORAGE_BACKEND=azure. Two auth paths, selected at __init__:
+
+  1. Managed Identity (preferred). When AZURE_STORAGE_ACCOUNT_URL is set the
+     adapter constructs BlobServiceClient(account_url, DefaultAzureCredential()).
+     On Azure App Service DefaultAzureCredential resolves to the Web App's
+     System-Assigned identity, which Terraform grants "Storage Blob Data
+     Contributor" on the storage account scope. No shared keys leave the
+     control plane this way.
+
+  2. Connection string (fallback). When AZURE_STORAGE_ACCOUNT_URL is unset
+     and AZURE_STORAGE_CONNECTION_STRING is provided, the adapter falls back
+     to BlobServiceClient.from_connection_string. Used in local dev and as a
+     break-glass while a fresh deploy waits on MI role-assignment propagation.
+
+Container is private; image bytes reach the browser via the backend proxy at
+/api/v1/products/images/file/{key}, never directly.
 """
 
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.identity import DefaultAzureCredential
 from loguru import logger
 
 from app.config import settings
@@ -17,9 +29,24 @@ from app.storage.interface import StorageService
 
 class AzureBlobStorageService(StorageService):
     def __init__(self):
-        self.client = BlobServiceClient.from_connection_string(
-            settings.azure_storage_connection_string
-        )
+        if settings.azure_storage_account_url:
+            self.client = BlobServiceClient(
+                account_url=settings.azure_storage_account_url,
+                credential=DefaultAzureCredential(),
+            )
+            self._auth_mode = "managed_identity"
+        elif settings.azure_storage_connection_string:
+            self.client = BlobServiceClient.from_connection_string(
+                settings.azure_storage_connection_string
+            )
+            self._auth_mode = "connection_string"
+        else:
+            raise RuntimeError(
+                "Azure storage requires either AZURE_STORAGE_ACCOUNT_URL "
+                "(Managed Identity) or AZURE_STORAGE_CONNECTION_STRING. "
+                "Neither is set."
+            )
+        logger.info("storage.azure.init", auth_mode=self._auth_mode)
         self.bucket = settings.azure_storage_container
         self._ensure_container(self.bucket)
 

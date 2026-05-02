@@ -127,6 +127,29 @@ What happened: `art-frontend:v21` was built using `frontend/Dockerfile` (the dev
 - `frontend/Dockerfile` is for local docker-compose dev only. Never tag it as `hoso30/art-frontend:vN` and push.
 - `art-frontend:v21` is blacklisted in `terraform/envs/dev/variables.tf`.
 
+## 9a. slowapi `headers_enabled=True` + dict-return endpoints (v26 incident)
+
+`slowapi`'s `_inject_headers` expects every response to be a `starlette.responses.Response` instance. FastAPI route handlers that `return {...}` (a dict) cause Starlette to wrap them in a `JSONResponse` later in the middleware chain — but `_inject_headers` runs *earlier* and raises `Exception: parameter response must be an instance of starlette.responses.Response` if `headers_enabled=True` (the default). The exception aborts the response, the rate-limiter short-circuits silently, and the limit never fires.
+
+`art-backend:v26` shipped this bug. Detected via local `TestClient` probe.
+
+**Rules:**
+
+- The Limiter in `backend/app/rate_limit.py` must be instantiated with `headers_enabled=False`. Don't flip it to True without confirming every rate-limited route returns a `Response` instance (none do today).
+- Tests in `backend/tests/test_auth_surface_hardening.py` lock the `_headers_enabled` attribute to `False` — keep them green.
+- v26 is blacklisted in `terraform/envs/dev/variables.tf`.
+
+## 9b. XFF port-stripping on Azure App Service (v27 incident)
+
+Azure App Service's front-end prepends an ephemeral source port to each `X-Forwarded-For` entry, e.g. `203.0.113.5:64923`. slowapi keys rate-limit buckets by the raw XFF entry, so every TCP connection (i.e. every curl request) lands in a fresh bucket and the rate limit never fires.
+
+`art-backend:v27` shipped without port-stripping. Detected by trying to flood `/auth/login` from a single source and seeing zero `429`s after 30 attempts.
+
+**Rules:**
+
+- `_client_ip` in `backend/app/rate_limit.py` must strip `:port` from each XFF entry (preserving IPv6 brackets). Tests lock the behavior in `test_auth_surface_hardening.py::test_client_ip_*`. Keep them green.
+- v27 is blacklisted in `terraform/envs/dev/variables.tf`.
+
 ## 10. Critical Data Protection — PostgreSQL & Azure Blob Storage are guarded twice
 
 The four data resources (`azurerm_postgresql_flexible_server.this`, `azurerm_postgresql_flexible_server_database.app`, `azurerm_storage_account.images`, `azurerm_storage_container.images`) are protected by two independent layers, both in `terraform/envs/dev/main.tf`:
@@ -142,4 +165,47 @@ The four data resources (`azurerm_postgresql_flexible_server.this`, `azurerm_pos
 - Never change `lock_level` from `CanNotDelete` to `ReadOnly` — `ReadOnly` blocks normal updates and breaks image deployments.
 - Before every `terraform apply`, scan the plan and report whether any protected resource is touched (`-/+`, `- destroy`). The expected steady-state plan for an image-tag bump or app-setting change is `1 to change, 0 to add, 0 to destroy` against the Web App resources only — the four protected resources should not appear at all.
 - The only foreseen legitimate recreate is the "PostgreSQL → West Europe" move when the `LocationIsOfferRestricted` subscription block lifts (see KNOWN_RISKS.md region exception). The recreate sequence is documented in `handoff/SAFE_TASK_RULES.md` Critical Data Protection section — `pg_dump` first, then layered config edits, then `pg_restore`, then re-protect.
+
+## 11. Two-stage apply when adding SystemAssigned identity to an existing Web App
+
+When `identity { type = "SystemAssigned" }` is added to an **existing** `azurerm_linux_web_app`, Terraform's planner sees `<resource>.identity[0]` as null in the pre-apply state (the state-side list is `[]` until apply completes). Any other resource that references `<resource>.identity[0].principal_id` in the same plan errors with `Missing required argument: principal_id`. A `count = length(...) > 0 ? 1 : 0` guard does NOT fix it — the planner resolves the principal_id expression eagerly even with count 0.
+
+This fired during Task C2a when adding the `Storage Blob Data Contributor` role assignment.
+
+**Rules:**
+
+- For retrofitting MI onto an already-deployed Web App, gate dependent resources behind a tfvars-toggled bool (`var.enable_storage_role_assignment` is the canonical example). Default `false`; flip to `true` in tfvars only after the first apply has created the identity. Document in `terraform/envs/dev/README.md` "Task C2a two-stage apply".
+- Do not change `enable_storage_role_assignment` from `true` to `false` in the dev tfvars — it would plan a destroy of the role assignment and break the running backend's MI auth.
+- For greenfield envs where the Web App is being CREATED with identity, the bool can be `true` from the start; `identity[0].principal_id` is correctly marked "known after apply" when the parent is in the plan-add set, and Terraform creates the role assignment in the same pass.
+
+## 12. `storage_use_azuread` + `shared_access_key_enabled = false` are a paired requirement
+
+`azurerm_storage_account`'s Read step always tries to fetch four data-plane sub-property blocks (`queue_properties`, `share_properties`, `static_website`, `blob_properties`) using the storage account's shared key. With `shared_access_key_enabled = false`, those reads 403 with `KeyBasedAuthenticationNotPermitted` on every plan/refresh — the provider gets stuck and you can't even plan to re-enable the key.
+
+This fired during Task C2b: the first apply succeeded in flipping `shared_access_key_enabled` on Azure side, but the post-modify refresh failed and left the saved plan stale. Recovered by adding `storage_use_azuread = true` to `provider "azurerm"` in `providers.tf`, then `terraform init -upgrade`, then re-plan/apply.
+
+**Rules:**
+
+- When disabling shared keys (`shared_access_key_enabled = false`), set `storage_use_azuread = true` on the azurerm provider in the **same edit**.
+- The SP must hold a Storage data-plane RBAC role on each storage account it touches — `Storage Blob Data Reader` is sufficient; `Storage Blob Data Contributor` / `Storage Blob Data Owner` also work. Subscription-scope Owner satisfies this transitively (current state).
+- If the SP is downgraded to Resource Manager `Contributor` only (control-plane), grant explicit `Storage Blob Data Owner` on `azurerm_storage_account.images` BEFORE the downgrade or all subsequent plans 403. See `handoff/SAFE_TASK_RULES.md` "Service Principal role for Terraform".
+- Do not remove `storage_use_azuread = true` from `providers.tf` while `shared_access_key_enabled = false`. The pair is required.
+
+## 13. Sensitive files in the repo (load-bearing — read before any commit)
+
+Three files contain secrets that the deployment depends on. All three are gitignored. Compromising any of them is a security incident:
+
+| File | Sensitive content | Impact of leak |
+|---|---|---|
+| `terraform/envs/dev/.env.terraform` | `ARM_*` Service Principal credentials | Full subscription control. |
+| `terraform/envs/dev/terraform.tfvars` | `backend_secret_key` (JWT signing key) | Mint admin tokens; total auth bypass. |
+| `terraform/envs/dev/terraform.tfstate` (and `.backup`) | Postgres `art_admin` password, `art_app` runtime password, storage account access keys (used to compute `storage_account_connection_string` even though shared-key auth is disabled at the data plane) | DB takeover. Also, although the storage account refuses shared-key auth, the keys are still embedded — if Azure ever rolled back the C2b setting somehow, the keys would work again. |
+
+**Rules:**
+
+- Never `cat`, `grep`, or otherwise echo the contents of these files into a chat / commit / PR description / log / screenshot.
+- Verify all three are absent from `git status` output before every commit. The repo's `.gitignore` covers them, but a misconfigured `git add -A` or a renamed file could slip one in.
+- Treat the `storage_account_connection_string` Terraform output as confidential even though it requires `terraform output -raw` to print — it embeds the still-existing storage account access key.
+- **Future hardening:** remove the `storage_account_connection_string` output from `terraform/envs/dev/outputs.tf` once nothing in the workflow needs it. Currently kept for break-glass debugging.
+- **Future hardening:** move Terraform state to a remote backend (Azure Storage with blob lease lock) — gives encryption at rest, audit trail, and per-user RBAC instead of the current "anyone with the file has all the secrets" mode.
 

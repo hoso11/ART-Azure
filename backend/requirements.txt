@@ -26,6 +26,10 @@ minio==7.2.12
 # Azure Blob Storage SDK — used when STORAGE_BACKEND=azure (Azure deploy).
 # MinIO stays for local docker-compose dev.
 azure-storage-blob==12.23.1
+# Azure Identity — DefaultAzureCredential for System-Assigned Managed Identity
+# auth against the storage account (Task C2a). Falls back to env-var / VS
+# Code / Azure CLI credentials in local dev.
+azure-identity==1.19.0
 
 # Email
 aiosmtplib==3.0.2
@@ -38,6 +42,9 @@ Pillow==11.0.0
 
 # HTTP
 httpx==0.28.1
+
+# Rate limiting (in-process; per-Uvicorn-worker counters — acceptable for F1)
+slowapi==0.1.9
 
 # Testing
 pytest==8.3.4

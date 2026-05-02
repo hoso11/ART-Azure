@@ -144,6 +144,18 @@ resource "azurerm_linux_web_app" "backend" {
   enabled    = var.backend_enabled
   https_only = true
 
+  # Task C2a — System-Assigned Managed Identity. The Web App is granted
+  # "Storage Blob Data Contributor" on the Storage Account scope (see
+  # azurerm_role_assignment.backend_blob_data_contributor below). The backend
+  # image v30+ reads AZURE_STORAGE_ACCOUNT_URL and authenticates via
+  # DefaultAzureCredential, which on Azure App Service resolves to this MI.
+  # Adding the identity is a no-op until the role assignment + URL setting
+  # are in place; the adapter falls back to the connection string while the
+  # role assignment propagates (typically <60s, occasionally up to 5 min).
+  identity {
+    type = "SystemAssigned"
+  }
+
   site_config {
     always_on           = false
     ftps_state          = "Disabled"
@@ -175,8 +187,16 @@ resource "azurerm_linux_web_app" "backend" {
     # The two DSNs are NOT interchangeable: wrong SSL keyword fails server-side.
     # Password is interpolated raw — random_password.override_special restricts
     # special chars to URL-safe ones, so no urlencode wrapper is needed.
-    DATABASE_URL      = "postgresql+asyncpg://${var.postgres_admin_user}:${random_password.postgres_admin.result}@${azurerm_postgresql_flexible_server.this.fqdn}:5432/${var.postgres_database_name}?ssl=require"
-    DATABASE_URL_SYNC = "postgresql://${var.postgres_admin_user}:${random_password.postgres_admin.result}@${azurerm_postgresql_flexible_server.this.fqdn}:5432/${var.postgres_database_name}?sslmode=require"
+    #
+    # Task C1: runtime DATABASE_URL connects as `art_app` (least-privilege —
+    # SELECT/INSERT/UPDATE/DELETE only). DATABASE_URL_SYNC keeps the server
+    # admin so alembic + bootstrap_db_user.py retain DDL + role management.
+    # ART_APP_DB_PASSWORD is the same value that's interpolated into
+    # DATABASE_URL above; the bootstrap script reads it from the env to
+    # set/rotate the role's password each cold start (idempotent).
+    DATABASE_URL        = "postgresql+asyncpg://art_app:${random_password.art_app_db.result}@${azurerm_postgresql_flexible_server.this.fqdn}:5432/${var.postgres_database_name}?ssl=require"
+    DATABASE_URL_SYNC   = "postgresql://${var.postgres_admin_user}:${random_password.postgres_admin.result}@${azurerm_postgresql_flexible_server.this.fqdn}:5432/${var.postgres_database_name}?sslmode=require"
+    ART_APP_DB_PASSWORD = random_password.art_app_db.result
 
     # Redis / Celery — sidecars share the parent Web App's network namespace,
     # so 127.0.0.1:6379 reaches the redis sidecar. Worker connects the same way.
@@ -184,20 +204,27 @@ resource "azurerm_linux_web_app" "backend" {
     CELERY_BROKER_URL     = "redis://127.0.0.1:${var.redis_port}/0"
     CELERY_RESULT_BACKEND = "redis://127.0.0.1:${var.redis_port}/1"
 
-    # Storage. 'azure' is the production path: backend image v20+ ships the
-    # Azure Blob adapter (azure-storage-blob SDK) and reads
-    # AZURE_STORAGE_CONNECTION_STRING / AZURE_STORAGE_CONTAINER below.
-    # 'minio' would require provisioning the MinIO sidecar (currently
-    # disabled by default — see var.minio_sidecar_enabled).
+    # Storage. 'azure' is the production path: backend image v30+ ships the
+    # Azure Blob adapter (azure-storage-blob + azure-identity SDKs) and
+    # reads AZURE_STORAGE_ACCOUNT_URL / AZURE_STORAGE_CONTAINER below to
+    # authenticate via Managed Identity. 'minio' would require provisioning
+    # the MinIO sidecar (currently disabled by default — see
+    # var.minio_sidecar_enabled).
     STORAGE_BACKEND = var.backend_storage_backend
 
-    # Azure Blob — connection string is sensitive. Stored in tfstate (gitignored)
-    # and in App Settings (visible to portal-admins, same trust boundary as
-    # the Postgres password). For a stricter setup, switch to System-Assigned
-    # Managed Identity + Storage Blob Data Contributor role + DefaultAzureCredential
-    # in code — deferred to a later phase.
-    AZURE_STORAGE_CONNECTION_STRING = azurerm_storage_account.images.primary_connection_string
-    AZURE_STORAGE_CONTAINER         = azurerm_storage_container.images.name
+    # Azure Blob — Managed Identity only (Task C2b).
+    # The backend image v30+ constructs
+    #   BlobServiceClient(AZURE_STORAGE_ACCOUNT_URL, DefaultAzureCredential())
+    # which on App Service resolves to this Web App's System-Assigned
+    # identity (granted "Storage Blob Data Contributor" via
+    # azurerm_role_assignment.backend_blob_data_contributor below).
+    # AZURE_STORAGE_CONNECTION_STRING is intentionally NOT set — C2b removed
+    # it after a soak window confirmed MI auth was healthy in production.
+    # Pair: shared_access_key_enabled = false on azurerm_storage_account.images
+    # blocks the storage plane from honoring shared-key auth even if a key
+    # leaked.
+    AZURE_STORAGE_ACCOUNT_URL = azurerm_storage_account.images.primary_blob_endpoint
+    AZURE_STORAGE_CONTAINER   = azurerm_storage_container.images.name
   }
 
   tags = module.naming.tags
@@ -357,6 +384,33 @@ resource "random_password" "postgres_admin" {
   override_special = "_-"
 }
 
+# Task C1 — least-privilege runtime role. The backend Web App's runtime
+# DATABASE_URL connects as `art_app` instead of the server administrator.
+# `art_app` is created and re-granted on every cold start by
+# backend/scripts/bootstrap_db_user.py (run from entrypoint.sh AFTER
+# alembic and BEFORE uvicorn). This password is rotated automatically
+# every time Terraform regenerates the random_password — the bootstrap
+# script ALTERs the role's password to match before uvicorn comes up.
+#
+# DATABASE_URL_SYNC continues to use random_password.postgres_admin so
+# alembic and the bootstrap itself keep DDL + role-management rights.
+resource "random_password" "art_app_db" {
+  length  = 24
+  special = true
+  upper   = true
+  lower   = true
+  numeric = true
+
+  min_upper   = 2
+  min_lower   = 2
+  min_numeric = 2
+  min_special = 2
+
+  # Same URL-unreserved alphabet as the admin password — the bootstrap
+  # script also rejects single-quote / backslash defensively.
+  override_special = "_-"
+}
+
 resource "azurerm_postgresql_flexible_server" "this" {
   name                = module.naming.postgres_server
   resource_group_name = azurerm_resource_group.this.name
@@ -484,9 +538,16 @@ resource "azurerm_storage_account" "images" {
   # blocks any future container drift from publishing data accidentally.
   allow_nested_items_to_be_public = false
 
-  # Connection-string auth is enabled (Phase-4 simplicity). Future phase:
-  # set to false and switch to Managed Identity + role assignments.
-  shared_access_key_enabled = true
+  # Shared-key auth disabled (Task C2b). All blob plane traffic must use
+  # Entra ID — the backend Web App authenticates via System-Assigned MI +
+  # the "Storage Blob Data Contributor" role assignment below. Disabling
+  # this neuters any leaked storage key (the account still has one in the
+  # control plane, but it can't be used to read/write blobs).
+  #
+  # Re-enable ONLY if you need a temporary break-glass (e.g. running a
+  # one-off `azcopy` from a workstation). Re-enable, do the work, set back
+  # to false, apply. Do NOT leave it enabled.
+  shared_access_key_enabled = false
 
   # Required for the Web App (West Europe) to reach this account over the
   # Azure backbone. No private endpoints (paid feature).
@@ -566,4 +627,70 @@ resource "azurerm_management_lock" "storage_no_delete" {
   scope      = azurerm_storage_account.images.id
   lock_level = "CanNotDelete"
   notes      = "Critical Data Protection. Inherits to azurerm_storage_container.images and all blobs. Remove only with explicit user approval — see handoff/SAFE_TASK_RULES.md."
+}
+
+# --- Task C2a: Managed Identity → Storage role assignment -------------------
+#
+# Grants the backend Web App's System-Assigned identity "Storage Blob Data
+# Contributor" on the storage account. Scoped at the account level so any
+# container under it (today: art-images; tomorrow: anything else we add) is
+# covered without needing a per-container assignment.
+#
+# Role: Storage Blob Data Contributor — read/write/delete blob data only. NOT
+# Storage Blob Data Owner (which can also set ACLs / POSIX permissions) and
+# NOT Storage Account Contributor (which is control-plane: rotate keys,
+# delete the account). Smallest role that lets the backend upload/download
+# product images and let the worker thumbnail pipeline read/write derived
+# blobs.
+#
+# Provider auth: requires Microsoft.Authorization/roleAssignments/write on
+# the storage account scope. The default Service Principal in
+# .env.terraform has Contributor on the resource group, which does NOT
+# include role-assignment write. The user has temporarily elevated the SP
+# to Owner (or User Access Administrator) for this apply only; after
+# verification the SP can be downgraded back to Contributor without losing
+# the role assignment (assignments persist independent of who created them).
+#
+# Cost: free. Role assignments are part of Azure RBAC / Resource Manager,
+# always free per CLAUDE.md §3 Allowlist.
+#
+# Bootstrap caveat — two-stage apply:
+#
+# When the SystemAssigned identity is being ADDED to an existing
+# azurerm_linux_web_app, Terraform's plan-time view of .identity is still
+# the empty list from prior state, so identity[0].principal_id evaluates
+# to null and the role assignment errors with "Missing required argument".
+# A `count = length(...) > 0` guard does not fix this — the planner still
+# resolves the principal_id expression against pre-apply state and aborts.
+#
+# var.enable_storage_role_assignment gates the role assignment on/off. The
+# documented sequence for an existing Web App that does not yet have an
+# identity:
+#
+#   Stage 1 — plan/apply with var.enable_storage_role_assignment = false
+#             (the default below). Plan: 0 add, 3 change, 0 destroy. The
+#             Web App gets the identity block; image bumps to v30; the
+#             AZURE_STORAGE_ACCOUNT_URL setting lands. Backend on cold-start
+#             still uses AZURE_STORAGE_CONNECTION_STRING (the fallback
+#             branch in azure_adapter.py).
+#
+#   Stage 2 — flip var.enable_storage_role_assignment to true (or set it
+#             in terraform.tfvars) and re-plan/apply. Plan: 1 add, 0 change,
+#             0 destroy. Role assignment is created; backend cold-restart
+#             flips to managed_identity auth.
+#
+# On a from-scratch apply where the Web App is being CREATED with identity,
+# the variable can be left at true from the start — identity[0].principal_id
+# is correctly marked "known after apply" when the parent resource is in the
+# plan-add set. The two-stage flow is only needed when retro-fitting an
+# already-deployed Web App.
+resource "azurerm_role_assignment" "backend_blob_data_contributor" {
+  count                = var.enable_storage_role_assignment ? 1 : 0
+  scope                = azurerm_storage_account.images.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = azurerm_linux_web_app.backend.identity[0].principal_id
+
+  # Defensive: pin the role name explicitly so a future PR can't widen
+  # this to "Storage Blob Data Owner" or "Storage Account Contributor"
+  # without showing up in the diff.
 }

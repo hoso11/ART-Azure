@@ -3,7 +3,7 @@ import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, ProductionStage, ProductionBatch } from "@/types";
 import { Card, CardContent } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { formatDate } from "@/lib/utils";
+import { formatDate, formatNumber } from "@/lib/utils";
 import Link from "next/link";
 import { OrderCurrentControl } from "./OrderCurrentControl";
 import { CreateBatchButton } from "./CreateBatchButton";
@@ -151,16 +151,16 @@ export default async function ProductionPage({
                     {b.variant ? `${b.variant.size} / ${b.variant.color}` : `#${b.variant_id}`}
                   </td>
                   <td className="px-6 py-4 text-sm font-medium">
-                    {b.quantity_to_produce}
+                    {formatNumber(b.quantity_to_produce)}
                     {b.stock_added && (
                       <div className="mt-1 text-xs flex items-center gap-2">
-                        <span className="text-green-700">Լավ՝ {b.good_quantity}</span>
+                        <span className="text-green-700">Լավ՝ {formatNumber(b.good_quantity)}</span>
                         {b.damaged_quantity > 0 && (
                           <span
                             className="bg-red-100 text-red-800 px-1.5 py-0.5 rounded font-medium"
                             title={b.defect_reason || undefined}
                           >
-                            Խոտան՝ {b.damaged_quantity}
+                            Խոտան՝ {formatNumber(b.damaged_quantity)}
                           </span>
                         )}
                       </div>

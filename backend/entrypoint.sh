@@ -38,6 +38,20 @@ until alembic upgrade head; do
 done
 echo "[entrypoint] migrations applied."
 
+# Bootstrap the least-privilege runtime DB user (art_app). Idempotent.
+# Connects as the server admin via DATABASE_URL_SYNC and (re)applies
+# grants + rotates the password from ART_APP_DB_PASSWORD. Skips silently
+# when those env vars are not set (docker-compose dev path).
+#
+# If bootstrap fails when the env vars ARE set, exit non-zero — uvicorn
+# would then immediately fail to authenticate as art_app, so it is safer
+# to refuse to boot than to flap on connection errors.
+echo "[entrypoint] bootstrapping art_app DB role..."
+if ! python -m scripts.bootstrap_db_user; then
+    echo "[entrypoint] bootstrap_db_user failed; refusing to start uvicorn." >&2
+    exit 1
+fi
+
 echo "[entrypoint] running idempotent seed..."
 python -m scripts.seed || echo "[entrypoint] seed step returned non-zero, continuing."
 

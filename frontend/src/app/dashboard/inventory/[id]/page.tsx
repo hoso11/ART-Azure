@@ -2,7 +2,7 @@ import { requireAdmin } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { Material, StockMovement, PaginatedResponse } from "@/types";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
-import { formatDateTime } from "@/lib/utils";
+import { formatDateTime, formatNumber } from "@/lib/utils";
 import Link from "next/link";
 import { EditMaterialForm, DeleteMaterialButton, AddStockMovement } from "../InventoryActions";
 
@@ -42,8 +42,8 @@ export default async function MaterialDetailPage({
             <dl className="space-y-3">
               <div><dt className="text-xs text-gray-500">Արտիկուլ</dt><dd className="text-sm font-mono">{material.sku}</dd></div>
               <div><dt className="text-xs text-gray-500">Չափման</dt><dd className="text-sm">{material.unit}</dd></div>
-              <div><dt className="text-xs text-gray-500">Առկա քանակ</dt><dd className="text-sm font-bold">{material.inventory?.quantity_on_hand ?? 0}</dd></div>
-              <div><dt className="text-xs text-gray-500">Ցածր մնացորդի սահման</dt><dd className="text-sm">{material.low_stock_threshold}</dd></div>
+              <div><dt className="text-xs text-gray-500">Առկա քանակ</dt><dd className="text-sm font-bold">{formatNumber(material.inventory?.quantity_on_hand ?? 0)}</dd></div>
+              <div><dt className="text-xs text-gray-500">Ցածր մնացորդի սահման</dt><dd className="text-sm">{formatNumber(material.low_stock_threshold)}</dd></div>
               <div><dt className="text-xs text-gray-500">Նկարագրություն</dt><dd className="text-sm">{material.description || "—"}</dd></div>
             </dl>
           </CardContent>
@@ -75,7 +75,7 @@ export default async function MaterialDetailPage({
                     <tr key={m.id}>
                       <td className="px-6 py-4 text-sm">{formatDateTime(m.created_at)}</td>
                       <td className={`px-6 py-4 text-sm font-medium ${m.quantity_change > 0 ? "text-green-700" : "text-red-700"}`}>
-                        {m.quantity_change > 0 ? "+" : ""}{m.quantity_change}
+                        {m.quantity_change > 0 ? "+" : ""}{formatNumber(m.quantity_change)}
                       </td>
                       <td className="px-6 py-4 text-sm capitalize">{m.reason.replace(/_/g, " ")}</td>
                       <td className="px-6 py-4 text-sm">{m.order_id ? `#${m.order_id}` : "—"}</td>

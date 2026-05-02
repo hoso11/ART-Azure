@@ -65,6 +65,12 @@ output "postgres_admin_password" {
   sensitive   = true
 }
 
+output "postgres_app_password" {
+  description = "Auto-generated password for the least-privilege runtime role `art_app` (Task C1). Rotated on every Terraform apply that recreates the random_password. Read with `terraform output -raw postgres_app_password`. Backend cold-start applies this value to the role via scripts/bootstrap_db_user.py."
+  value       = random_password.art_app_db.result
+  sensitive   = true
+}
+
 # --- Sidecar status ---------------------------------------------------------
 
 output "worker_sidecar_enabled" {

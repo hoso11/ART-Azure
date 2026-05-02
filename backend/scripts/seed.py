@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 # Add parent to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.config import settings
+from app.config import settings, WEAK_SECRET_KEYS
 from app.database import Base
 from app.users.models import User, UserRole
 from app.users.service import hash_password
@@ -23,11 +23,76 @@ from app.inventory.models import Material, Inventory
 from app.orders.models import Order, OrderItem, OrderStatus, OrderPriority
 from app.production.models import ProductionStage, StageName, StageStatus
 
-engine = create_engine(settings.database_url_sync)
-Session = sessionmaker(bind=engine)
+# Default seed credentials — only used when seeding is explicitly enabled in
+# production via ADMIN_INITIAL_PASSWORD. The default plaintext is rejected at
+# every gate so it can never reach a production database.
+DEFAULT_ADMIN_EMAIL = "admin@art-manufacturing.com"
+DEFAULT_ADMIN_PASSWORD = "admin123456"
+DEFAULT_USER_PASSWORD = "user123456"
+
+# Passwords known to be public in this repo or commonly seen in seed scripts.
+# Used as the production guard for ADMIN_INITIAL_PASSWORD.
+WEAK_ADMIN_PASSWORDS = frozenset({
+    "",
+    "admin",
+    "admin123",
+    "admin123456",
+    "password",
+    "password123",
+    "changeme",
+    "change-me",
+    "123456",
+    "12345678",
+})
+
+
+def _should_run_seed() -> tuple[bool, str]:
+    """Decide whether the seed script should run, and explain why.
+
+    Production is opt-in: the script aborts unless ENABLE_SEED_DATA=true AND
+    ADMIN_INITIAL_PASSWORD is set to a non-weak value. Local docker-compose
+    and pytest (APP_ENV != production) keep the prior behaviour.
+    """
+    env = settings.app_env
+    if env != "production":
+        return True, f"non-production (APP_ENV={env}) — seeding allowed"
+
+    enable_flag = os.environ.get("ENABLE_SEED_DATA", "").strip().lower()
+    if enable_flag != "true":
+        return False, "production with ENABLE_SEED_DATA != true — refusing to seed default credentials"
+
+    admin_pw = os.environ.get("ADMIN_INITIAL_PASSWORD", "")
+    if not admin_pw:
+        return False, "production seed requested but ADMIN_INITIAL_PASSWORD is not set"
+    if admin_pw.lower() in WEAK_ADMIN_PASSWORDS:
+        return False, "production seed refused: ADMIN_INITIAL_PASSWORD is a known weak/default value"
+    if len(admin_pw) < 12:
+        return False, "production seed refused: ADMIN_INITIAL_PASSWORD must be at least 12 characters"
+
+    return True, "production seed enabled with non-weak ADMIN_INITIAL_PASSWORD"
+
+
+def _resolved_admin_password() -> str:
+    """Return the password to seed the admin with. Production uses
+    ADMIN_INITIAL_PASSWORD (already validated by _should_run_seed). Dev keeps
+    the legacy default so docker-compose flows are unchanged."""
+    if settings.app_env == "production":
+        return os.environ["ADMIN_INITIAL_PASSWORD"]
+    return os.environ.get("ADMIN_INITIAL_PASSWORD") or DEFAULT_ADMIN_PASSWORD
 
 
 def seed():
+    should_run, reason = _should_run_seed()
+    if not should_run:
+        print(f"[seed] skipped: {reason}")
+        return
+
+    print(f"[seed] running: {reason}")
+
+    # Engine is created lazily so importing this module (e.g. from tests)
+    # does not require a reachable database.
+    engine = create_engine(settings.database_url_sync)
+    Session = sessionmaker(bind=engine)
     db = Session()
 
     try:
@@ -63,9 +128,10 @@ def seed():
         db.flush()
 
         # ── Users ──
+        admin_password = _resolved_admin_password()
         admin = User(
-            email="admin@art-manufacturing.com",
-            hashed_password=hash_password("admin123456"),
+            email=DEFAULT_ADMIN_EMAIL,
+            hashed_password=hash_password(admin_password),
             role=UserRole.admin,
         )
         db.add(admin)
@@ -230,9 +296,12 @@ def seed():
 
         db.commit()
         print("Seed data inserted successfully!")
-        print(f"  Admin login: admin@art-manufacturing.com / admin123456")
-        print(f"  User login:  john@mitchell-retail.com / user123456")
-        print(f"  User login:  sarah@chenfashion.com / user123456")
+        if settings.app_env == "production":
+            print(f"  Admin login: {DEFAULT_ADMIN_EMAIL} / <ADMIN_INITIAL_PASSWORD>")
+        else:
+            print(f"  Admin login: {DEFAULT_ADMIN_EMAIL} / {admin_password}")
+            print(f"  User login:  john@mitchell-retail.com / {DEFAULT_USER_PASSWORD}")
+            print(f"  User login:  sarah@chenfashion.com / {DEFAULT_USER_PASSWORD}")
 
     except Exception as e:
         db.rollback()

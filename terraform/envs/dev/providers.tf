@@ -33,6 +33,21 @@ provider "azurerm" {
 
   subscription_id = var.subscription_id
   tenant_id       = var.tenant_id
+
+  # Task C2b — once shared_access_key_enabled = false on a storage account,
+  # the azurerm provider's Read step still tries to fetch data-plane sub-
+  # properties (queue_properties, share_properties, static_website,
+  # blob_properties) and 403s with KeyBasedAuthenticationNotPermitted unless
+  # this flag is set. With storage_use_azuread = true the provider uses the
+  # Service Principal's Entra ID token for those reads instead. The SP must
+  # therefore hold a Storage data-plane role on each storage account it
+  # touches — "Storage Blob Data Owner" or "Storage Blob Data Contributor"
+  # is sufficient. The SP already has effective Owner on the storage account
+  # (via subscription-scope Owner during C2a), so reads succeed today; if
+  # the SP is later downgraded to Contributor, grant it explicit
+  # "Storage Blob Data Owner" on azurerm_storage_account.images to keep
+  # plans/applies working.
+  storage_use_azuread = true
 }
 
 provider "azapi" {

@@ -21,6 +21,15 @@ export function formatCurrency(amount: number | string): string {
   return `${new Intl.NumberFormat("hy-AM", { maximumFractionDigits: 0 }).format(Math.round(num))} ֏`;
 }
 
+export function formatNumber(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "";
+  const str = String(value);
+  if (!str.includes(".")) return str;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return str;
+  return num.toFixed(1);
+}
+
 export function cn(...classes: (string | boolean | undefined | null)[]): string {
   return classes.filter(Boolean).join(" ");
 }

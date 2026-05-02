@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { ProductVariant, Material, ProductSizeMaterialRequirement } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { FormField, Input } from "@/components/ui/FormField";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, formatNumber } from "@/lib/utils";
 
 // ── Variant form (add / edit) ─────────────────────────
 
@@ -114,7 +114,7 @@ function RequirementRow({
             autoFocus
           />
         ) : (
-          req.quantity_per_item
+          formatNumber(req.quantity_per_item)
         )}
       </td>
       <td className="px-4 py-2 text-sm text-gray-500">{req.material?.unit ?? ""}</td>
@@ -299,7 +299,7 @@ function ProductMaterialRequirementsPanel({
                 <option value="">Ընտրել նյութ...</option>
                 {materials.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.name} ({m.unit}){m.inventory ? ` — ${m.inventory.quantity_on_hand} on hand` : ""}
+                    {m.name} ({m.unit}){m.inventory ? ` — ${formatNumber(m.inventory.quantity_on_hand)} on hand` : ""}
                   </option>
                 ))}
               </select>
@@ -435,8 +435,8 @@ export function VariantManager({ productId, variants }: { productId: number; var
                       <td className="px-6 py-4 text-sm">{v.size}</td>
                       <td className="px-6 py-4 text-sm">{v.color}</td>
                       <td className="px-6 py-4 text-sm">{formatCurrency(v.price)}</td>
-                      <td className="px-6 py-4 text-sm">{v.stock_quantity}</td>
-                      <td className={`px-6 py-4 text-sm ${v.damaged_stock_quantity > 0 ? "text-red-700 font-medium" : "text-gray-400"}`}>{v.damaged_stock_quantity}</td>
+                      <td className="px-6 py-4 text-sm">{formatNumber(v.stock_quantity)}</td>
+                      <td className={`px-6 py-4 text-sm ${v.damaged_stock_quantity > 0 ? "text-red-700 font-medium" : "text-gray-400"}`}>{formatNumber(v.damaged_stock_quantity)}</td>
                       <td className="px-6 py-4 text-right">
                         {deleteId === v.id ? (
                           <span className="flex items-center gap-1 justify-end text-xs">

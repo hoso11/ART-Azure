@@ -3,7 +3,7 @@ import { serverGet } from "@/lib/api.server";
 import { Order, ProductionStage, PaginatedResponse } from "@/types";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { formatDate, formatCurrency } from "@/lib/utils";
+import { formatDate, formatCurrency, formatNumber } from "@/lib/utils";
 import Link from "next/link";
 import { OrderStatusChange } from "../OrderStatusChange";
 
@@ -86,11 +86,11 @@ export default async function OrderDetailPage({
                           </div>
                         )}
                       </td>
-                      <td className="px-6 py-4 text-sm">{item.quantity}</td>
+                      <td className="px-6 py-4 text-sm">{formatNumber(item.quantity)}</td>
                       {order.status !== "draft" && (
                         <>
-                          <td className="px-6 py-4 text-sm text-green-700 font-medium">{item.fulfilled_from_stock}</td>
-                          <td className="px-6 py-4 text-sm text-orange-600 font-medium">{item.production_quantity}</td>
+                          <td className="px-6 py-4 text-sm text-green-700 font-medium">{formatNumber(item.fulfilled_from_stock)}</td>
+                          <td className="px-6 py-4 text-sm text-orange-600 font-medium">{formatNumber(item.production_quantity)}</td>
                         </>
                       )}
                       <td className="px-6 py-4 text-sm">{formatCurrency(item.unit_price)}</td>

@@ -45,17 +45,18 @@ frontend_image_tag = "v24"
 container_port     = 3000
 
 # --- Backend image ---------------------------------------------------------
-# v21 makes the products image proxy backend-agnostic — it now streams via
-# storage.download_file() so MinIO and Azure Blob both work. v20 was
-# MinIO-only and 404'd in Azure for image GETs.
-# v20 baseline: Azure Blob Storage adapter (azure-storage-blob SDK,
-# app/storage/azure_adapter.py implemented, products proxy + worker task
-# routed through the StorageService abstraction). Required for
-# STORAGE_BACKEND=azure (the default in Azure deploys).
-# NOTE: do NOT use v13 — that image contains the failed migration 009
-# (handoff/KNOWN_RISKS.md #2).
+# v30 = Task C2a Storage Managed Identity. Adapter prefers
+# DefaultAzureCredential when AZURE_STORAGE_ACCOUNT_URL is set; the Web App's
+# System-Assigned identity holds Storage Blob Data Contributor on the storage
+# account. Connection string remains as a Terraform-level fallback.
+# v29 = Task C1 PostgreSQL least-privilege runtime user.
+# v28 = Task B auth-surface hardening.
+# v25 = Task A credentials hardening (SECRET_KEY validation, docs disabled,
+# seed gate).
+# NOTE: do NOT use v13 (poisoned, KNOWN_RISKS.md #2), v26 (slowapi
+# inject-headers bug), or v27 (missing XFF port-stripping).
 backend_image     = "hoso30/art-backend"
-backend_image_tag = "v21"
+backend_image_tag = "v30"
 backend_port      = 8000
 
 # --- Backend lifecycle -----------------------------------------------------
@@ -101,8 +102,17 @@ minio_bucket       = "art-images"
 # minio_secret_key = "minioadmin"   # default; replace before real use
 
 # --- Backend app settings --------------------------------------------------
-# JWT signing key — replace before any real auth use.
-backend_secret_key      = "placeholder-dev-secret-change-me"
+# JWT signing key — REQUIRED. Generate a real value before plan/apply:
+#
+#   openssl rand -hex 32
+#
+# Then paste the output into your gitignored terraform.tfvars (this file's
+# real, uncommitted twin). Variables.tf rejects known placeholders and any
+# value shorter than 32 characters; the backend image v25+ refuses to start
+# in production with the same set of weak values. Never commit this value.
+#
+# backend_secret_key = "REPLACE-WITH-OUTPUT-OF-openssl-rand-hex-32"
+#
 # Storage backend in Azure: 'azure' (default) uses managed Blob Storage;
 # 'minio' would require enabling the sidecar above.
 backend_storage_backend = "azure"

@@ -55,9 +55,10 @@ exception clause.
 
 - **No nginx.** The Azure platform terminates TLS and the Next.js rewrite handles the `/api/*` → backend hop. nginx would only add a hop.
 - **No Postgres sidecar.** Replaced by Azure Database for PostgreSQL Flexible Server in Phase 3.
-- **No MinIO sidecar.** Replaced by Azure Blob Storage in Phase 4. The MinIO sitecontainer resource is still in `main.tf` but defaults to `minio_sidecar_enabled = false`. MinIO remains the local-dev backend in `docker-compose.yml`.
+- **No MinIO sidecar in Azure.** Replaced by Azure Blob Storage in Phase 4. The MinIO sitecontainer resource is still defined in `main.tf` for local-dev parity but defaults to `minio_sidecar_enabled = false`. MinIO remains the **local docker-compose** backend only — never enable it in deployed envs.
+- **No connection-string auth to Blob.** Removed in Task C2b. The backend authenticates via System-Assigned Managed Identity → "Storage Blob Data Contributor" on the storage account. `shared_access_key_enabled = false` on the storage account locks shared keys at the data plane.
 - **No Application Insights / Log Analytics.** Logs available via portal Log Stream and Kudu only.
-- **No Key Vault.** PostgreSQL admin password lives in `terraform.tfstate` (gitignored).
+- **No Key Vault.** PostgreSQL admin password and storage connection string live in `terraform.tfstate` (gitignored, sensitive — see "Sensitive files" below). `SECRET_KEY` lives in `terraform/envs/dev/terraform.tfvars` (gitignored).
 - **No CI/CD.** Image builds and `terraform apply` are run from a developer workstation.
 
 ## Image registry
@@ -73,14 +74,24 @@ Image tag history (relevant):
 |---|---|---|
 | `art-backend:v13` | **Forbidden** | Failed migration `009`; `backend/entrypoint.sh` whitelist exists to recover from it. See `handoff/KNOWN_RISKS.md` #2. |
 | `art-backend:v20` | Retired | Pre-Azure-Blob baseline. |
-| `art-backend:v21` | **Live** | Backend-agnostic image proxy (works with both MinIO and Azure Blob). Phase 5 image gallery support. |
+| `art-backend:v21` | Retired | Backend-agnostic image proxy. |
+| `art-backend:v25` | Retired | Task A — credentials hardening (SECRET_KEY validation, FastAPI docs gated in production, seed credential gate). |
+| `art-backend:v26` | **Forbidden** | slowapi `headers_enabled=True` + dict-return endpoints raised inside `_inject_headers`, short-circuiting the rate limiter. |
+| `art-backend:v27` | **Forbidden** | Missing XFF port-strip; Azure App Service prepended ephemeral source ports to each XFF entry, so every request landed in a fresh rate-limit bucket. |
+| `art-backend:v28` | Retired | Task B — auth-surface hardening (slowapi 5/min login, OriginCheckMiddleware, non-root container). |
+| `art-backend:v29` | Retired | Task C1 — least-privilege Postgres runtime user `art_app` via `scripts/bootstrap_db_user.py`. |
+| `art-backend:v30` | **Live** | Task C2a/C2b — Azure Blob via Managed Identity. Adapter constructs `BlobServiceClient(account_url, DefaultAzureCredential())` when `AZURE_STORAGE_ACCOUNT_URL` is set; falls back to connection string only if it isn't (no longer used in Azure). Adds `azure-identity==1.19.0` dep. |
 | `art-frontend:v20` | Retired | Last working pre-gallery frontend. |
 | `art-frontend:v21` | **Forbidden** | Built from `frontend/Dockerfile` (dev mode `npm run dev`); crashed at runtime in Azure with PostCSS / Tailwind error. |
 | `art-frontend:v22` | **Forbidden** | Production build, but MSYS-mangled `NEXT_PUBLIC_API_URL` poisoned every client-side fetch. |
 | `art-frontend:v23` | **Forbidden** | Same MSYS poisoning as v22 plus the v23 modal defensive logic. |
 | `art-frontend:v24` | **Live** | Built with `MSYS_NO_PATHCONV=1`. Clean `/api/v1` base URL. Ships defensive modal logic from v23. |
 
-`v13`, `v21`, `v22`, `v23` are blocked by the `frontend_image_tag` validation in `terraform/envs/dev/variables.tf` so they cannot be redeployed accidentally.
+Blacklisted in `terraform/envs/dev/variables.tf` validation:
+- Frontend: `v13`, `v21`, `v22`, `v23`.
+- Backend: `v13`, `v26`, `v27`.
+
+These tags cannot be redeployed accidentally — Terraform refuses to plan with them.
 
 ## Deployment workflow
 
@@ -157,24 +168,74 @@ If Azure responds during apply with `HTTP response was nil; connection may have 
 
 ## Application settings (managed by Terraform)
 
-App Service application settings on the backend Web App are set in `main.tf` and **must not** be edited manually in the portal. The relevant ones:
+App Service application settings on the backend Web App are set in `main.tf` and **must not** be edited manually in the portal. The azurerm provider performs a full sync of the `app_settings` map on every apply — any portal-added setting that isn't declared in `main.tf` is removed on the next `terraform apply`. Terraform is the source of truth.
+
+### Backend Web App
 
 | Setting | Value | Source |
 |---|---|---|
-| `WEBSITES_PORT` | `8000` (backend) / `3000` (frontend) | hardcoded |
+| `WEBSITES_PORT` | `8000` | `var.backend_port` |
+| `WEBSITES_ENABLE_APP_SERVICE_STORAGE` | `false` | hardcoded (Azure platform) |
 | `APP_ENV` | `production` | hardcoded |
+| `DEBUG` | `false` | hardcoded |
 | `LOG_FORMAT` | `json` | hardcoded |
-| `SECRET_KEY` | tfvars / generated | `var.backend_secret_key` |
-| `DATABASE_URL` (asyncpg) | computed | Postgres FQDN + admin password + `?ssl=require` |
-| `DATABASE_URL_SYNC` (psycopg2) | computed | Postgres FQDN + admin password + `?sslmode=require` |
-| `REDIS_URL`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` | `redis://localhost:6379/…` | shared network namespace inside backend Web App |
-| `STORAGE_BACKEND` | `azure` | tfvars (was `minio` pre-Phase-4) |
-| `AZURE_STORAGE_CONNECTION_STRING` | computed | from `azurerm_storage_account.this.primary_connection_string`, sensitive |
-| `AZURE_BLOB_CONTAINER` | `art-images` | tfvars |
-| `INTERNAL_API_URL` | backend Web App URL | only consumed by frontend image at **build time** — App Setting present for completeness |
-| `ALLOWED_ORIGINS` | frontend URL | for CORS / cookie handling |
+| `SECRET_KEY` | from gitignored `terraform.tfvars` | `var.backend_secret_key` |
+| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | hardcoded |
+| `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | `7` | hardcoded |
+| `ALLOWED_ORIGINS` | computed | `https://${module.naming.web_app_frontend}.azurewebsites.net` |
+| `DATABASE_URL` (asyncpg) | computed | `art_app` user + `random_password.art_app_db.result` + Postgres FQDN + `?ssl=require`. Runtime DB user is the **least-privilege `art_app` role** (Task C1) — SELECT/INSERT/UPDATE/DELETE only, no DDL. |
+| `DATABASE_URL_SYNC` (psycopg2) | computed | `var.postgres_admin_user` (`art_admin`) + `random_password.postgres_admin.result` + Postgres FQDN + `?sslmode=require`. Used by Alembic migrations and by `scripts/bootstrap_db_user.py` only. |
+| `ART_APP_DB_PASSWORD` | computed | `random_password.art_app_db.result`. Read by `scripts/bootstrap_db_user.py` to set/rotate the `art_app` role's password on each cold start. |
+| `REDIS_URL`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` | `redis://127.0.0.1:6379/0` and `/1` | `var.redis_port`. Shared loopback inside the backend Web App (sidecars). |
+| `STORAGE_BACKEND` | `azure` | `var.backend_storage_backend`. `minio` is local-dev only — never set to `minio` in Azure. |
+| `AZURE_STORAGE_ACCOUNT_URL` | computed | `azurerm_storage_account.images.primary_blob_endpoint`. The backend's adapter constructs `BlobServiceClient(account_url, DefaultAzureCredential())` and authenticates via the Web App's System-Assigned identity (Task C2a/C2b). |
+| `AZURE_STORAGE_CONTAINER` | `art-images` | `azurerm_storage_container.images.name` |
+| `AZURE_STORAGE_CONNECTION_STRING` | **REMOVED in C2b.** | The setting is no longer in `app_settings`. The storage account also has `shared_access_key_enabled = false`, so even if the setting were resurrected, the data plane would refuse shared-key auth. |
 
-The frontend Web App also has an `INTERNAL_API_URL` setting, but that value is **inert** because Next.js standalone bakes the rewrite destination at build time. The build-arg above is what actually wires the routing.
+### Frontend Web App
+
+| Setting | Value | Source |
+|---|---|---|
+| `WEBSITES_PORT` | `3000` | `var.container_port` |
+| `WEBSITES_ENABLE_APP_SERVICE_STORAGE` | `false` | hardcoded |
+| `NODE_ENV` | `production` | hardcoded |
+| `INTERNAL_API_URL` | computed | `https://${module.naming.web_app_backend}.azurewebsites.net`. **Inert at runtime** — Next.js standalone bakes the rewrite destination at frontend image build time via the matching `--build-arg`. The App Setting is declared so the value is visible in the portal and ready if a future SSR runtime read is added. Bumping it without a fresh frontend image build has no effect. |
+| `NEXT_PUBLIC_API_URL` | `/api/v1` | hardcoded — must stay relative so SameSite=Lax cookies ride client-side fetches. |
+
+### Why ALLOWED_ORIGINS / INTERNAL_API_URL use `module.naming.*` instead of resource attributes
+
+Both directions can't reference `azurerm_linux_web_app.X.default_hostname` or Terraform errors with a graph cycle (backend depends on frontend, frontend depends on backend). The naming module is a pure-string output `app-${project}-${component}-${environment}-${suffix}` driven by the same variables that name the Web Apps themselves, so the values are guaranteed identical to the actual hostnames as long as no custom domain is bound. Both settings remain 100% Terraform-managed — no portal edit can persist.
+
+### Storage authentication after C2b — Managed Identity only
+
+```
+Backend Web App (System-Assigned identity)
+  └── principal_id = 8b108e0c-10af-4d3d-9a34-5f372f684064
+       └── role: Storage Blob Data Contributor
+            scope: storageAccounts/startdevimgsart4242
+```
+
+- `azurerm_role_assignment.backend_blob_data_contributor[0]` — created in Task C2a stage 2.
+- `azurerm_storage_account.images.shared_access_key_enabled = false` — set in Task C2b. Blocks shared-key auth at the data plane regardless of whether keys leak.
+- The `azurerm` provider has `storage_use_azuread = true` (in `providers.tf`) so `terraform plan` can read storage data-plane sub-properties (`queue_properties`, etc.) via the SP's Entra ID token instead of shared keys. **The SP must therefore hold `Storage Blob Data Reader` (or higher) on the storage account scope** for plans to work — currently inherited from subscription-scope Owner. If the SP is downgraded back to Resource Manager `Contributor`, grant explicit `Storage Blob Data Owner` on `azurerm_storage_account.images` or plans will 403 on `KeyBasedAuthenticationNotPermitted`.
+
+### PostgreSQL authentication — split-role
+
+- **Application runtime** uses `art_app` (least-privilege role created on each cold start by `backend/scripts/bootstrap_db_user.py`). Granted `CONNECT` on the database, `USAGE` on schema `public`, and `SELECT/INSERT/UPDATE/DELETE` on tables + sequences. **No DDL, no role management, no superuser.**
+- **Migrations and bootstrap** use `art_admin` (server administrator from `var.postgres_admin_user` + `random_password.postgres_admin`). `DATABASE_URL_SYNC` carries this DSN; `entrypoint.sh` runs Alembic against it, then `scripts/bootstrap_db_user.py` against it (which idempotently creates `art_app`, sets its password from `ART_APP_DB_PASSWORD`, and re-grants the privileges), and only then does `uvicorn` start using `DATABASE_URL` (the `art_app` DSN).
+- A leaked runtime DSN therefore cannot drop tables, exfiltrate via `COPY ... TO PROGRAM`, or escalate privileges.
+
+## Sensitive files (never commit, never echo)
+
+These three files contain secrets that the deployment depends on. Every contributor must respect this list:
+
+| File | Why sensitive | Status |
+|---|---|---|
+| `terraform/envs/dev/.env.terraform` | Contains the four `ARM_*` Service Principal credentials. Anyone with these can fully control the Azure subscription. | **Gitignored.** Never `cat`, never paste into chat / commits / commit messages. |
+| `terraform/envs/dev/terraform.tfvars` | Contains `backend_secret_key` (JWT signing key) and persists `enable_storage_role_assignment = true`. JWT key compromise = mint admin tokens. | **Gitignored.** |
+| `terraform/envs/dev/terraform.tfstate` | Contains generated Postgres admin password, `art_app` DB password, storage account access keys (used to compute `primary_connection_string` in state output even though shared-key auth is disabled at the data plane). | **Gitignored.** Treat as an offline secret store; if shared with a teammate, share over a secure channel. Future hardening: move to remote backend (Azure Storage with blob lease lock) so state is encrypted at rest with audit trail. |
+
+The `storage_account_connection_string` Terraform output is marked `sensitive` and will not print without `terraform output -raw`. Even with `shared_access_key_enabled = false`, treat the connection string as confidential — it embeds the still-existing storage account access key. **Future hardening:** remove the `storage_account_connection_string` output from `outputs.tf` entirely once nothing in the workflow needs it.
 
 ## Critical Data Protection (PostgreSQL & Azure Blob Storage)
 
@@ -242,7 +303,7 @@ After the 12-month window expires, B1MS bills ~$15/month and 32 GB SSD bills ~$3
 
 ## Verifying confirmed-working features
 
-Each feature below is part of the live deployment as of v24 (frontend) / v21 (backend):
+Each feature below is part of the live deployment as of v24 (frontend) / v30 (backend):
 
 | Feature | Manual check |
 |---|---|

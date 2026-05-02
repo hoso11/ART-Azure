@@ -4,9 +4,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+
 from app.config import settings
 from app.exceptions import AppException, app_exception_handler
 from app.middleware import RequestLoggingMiddleware
+from app.origin_check import OriginCheckMiddleware, build_origin_middleware_args
+from app.rate_limit import limiter, rate_limit_exceeded_handler
 
 # Configure loguru
 logger.remove()
@@ -27,13 +32,34 @@ async def lifespan(app: FastAPI):
     logger.info(f"Shutting down {settings.app_name}")
 
 
+def _docs_kwargs(env: str) -> dict:
+    """Disable Swagger / OpenAPI / ReDoc in production. Leaving them on
+    publicly leaks the full endpoint surface and parameter schemas to
+    attackers. Dev keeps them for /api/v1/docs."""
+    if env == "production":
+        return {"docs_url": None, "openapi_url": None, "redoc_url": None}
+    return {
+        "docs_url": "/api/v1/docs",
+        "openapi_url": "/api/v1/openapi.json",
+        "redoc_url": "/api/v1/redoc",
+    }
+
+
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
-    docs_url="/api/v1/docs",
-    openapi_url="/api/v1/openapi.json",
     lifespan=lifespan,
+    **_docs_kwargs(settings.app_env),
 )
+
+# Rate limiting (slowapi). Counters live on app.state; no-op in non-production.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+# Origin / Referer enforcement on unsafe methods. No-op in non-production so
+# pytest's ASGI transport and docker-compose dev keep working.
+app.add_middleware(OriginCheckMiddleware, **build_origin_middleware_args())
 
 # CORS
 app.add_middleware(

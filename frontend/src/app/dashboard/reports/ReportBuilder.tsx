@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Customer, Material } from "@/types";
-import { formatDate, formatCurrency, getStatusColor } from "@/lib/utils";
+import { formatDate, formatCurrency, formatNumber, getStatusColor } from "@/lib/utils";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 
 // ── Types ────────────────────────────────────────────────
@@ -144,7 +144,7 @@ function renderCell(value: unknown, col: Col): React.ReactNode {
 
   if (col.format === "currency") return formatCurrency(Number(value));
   if (col.format === "date") return formatDate(String(value));
-  if (col.format === "number") return String(value);
+  if (col.format === "number") return formatNumber(value as number | string);
   if (col.format === "bool") {
     return value ? (
       <span className="text-xs font-semibold text-red-600">Ցածր</span>
@@ -318,7 +318,7 @@ function DamagedStockPreview({ data }: { data: DamagedStockData }) {
                   <td className="py-2 pr-4 text-gray-500 font-mono text-xs">{row.sku}</td>
                   <td className="py-2 pr-4">{row.size}</td>
                   <td className="py-2 pr-4">{row.color}</td>
-                  <td className="py-2 text-red-700 font-semibold">{row.damaged_stock_quantity}</td>
+                  <td className="py-2 text-red-700 font-semibold">{formatNumber(row.damaged_stock_quantity)}</td>
                 </tr>
               ))}
             </tbody>

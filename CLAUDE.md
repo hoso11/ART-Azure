@@ -57,14 +57,44 @@ Effect: any DELETE attempt against these resources via portal, `az` CLI, ARM API
 
 ### Storage Account — additional non-destroy guardrails
 
-These should also remain in place; changing them silently shifts the resource off the free tier:
+These should also remain in place; changing them silently shifts the resource off the free tier or weakens security:
 
 - `account_replication_type = "LRS"` (GRS/ZRS bill from byte one)
 - `account_kind = "StorageV2"` (premium tiers bill from byte one)
 - `access_tier = "Hot"` (Cool/Archive change retrieval cost behavior)
 - `allow_nested_items_to_be_public = false` (account-level safety net for the private container)
+- `shared_access_key_enabled = false` (Task C2b — only Entra ID/Managed Identity tokens accepted at the data plane). Do not flip back to `true` for any reason except a documented break-glass operation; flip back to `false` immediately after.
 
 The lifecycle precondition on the Postgres server (`var.postgres_sku_name == "B_Standard_B1ms"`) is the equivalent for the database side.
+
+### Security state — Tasks A / B / C (load-bearing — these are live in the deployed dev env)
+
+The following hardening is in production and must not regress:
+
+**PostgreSQL — split-role auth (Task C1, backend image v29+):**
+- Application runtime connects as `art_app` (`DATABASE_URL`), which has only `CONNECT` on the database, `USAGE` on schema `public`, and `SELECT/INSERT/UPDATE/DELETE` on tables and sequences. **No DDL, no role management, no superuser.**
+- Migrations + bootstrap connect as `art_admin` (`DATABASE_URL_SYNC`), which is the server administrator. `backend/entrypoint.sh` runs Alembic + `scripts/bootstrap_db_user.py` against this DSN, then uvicorn starts using the runtime DSN.
+- `scripts/bootstrap_db_user.py` is idempotent: each cold start `CREATE ROLE art_app` if missing, `ALTER ROLE art_app WITH PASSWORD <ART_APP_DB_PASSWORD>`, and re-grants the privileges (so password rotations and new tables are picked up automatically).
+- **Do not** wire app code (FastAPI handlers, services, Celery tasks) to the admin DSN. **Do not** edit `bootstrap_db_user.py` to skip the gate, hardcode a password, or use string-formatted SQL — it uses `psycopg2.sql.Identifier`/`sql.Literal` to prevent SQL injection on the password field. Tests in `backend/tests/test_db_bootstrap.py` lock the role name and the absence of hardcoded passwords.
+
+**Azure Blob — Managed Identity only (Tasks C2a + C2b, backend image v30):**
+- Backend Web App has `identity { type = "SystemAssigned" }`, granted `Storage Blob Data Contributor` on the storage account scope (`azurerm_role_assignment.backend_blob_data_contributor[0]`). Backend authenticates via `BlobServiceClient(account_url, DefaultAzureCredential())`.
+- `AZURE_STORAGE_CONNECTION_STRING` is **NOT** in backend `app_settings`. Do not re-add it.
+- `azurerm_storage_account.images.shared_access_key_enabled = false`. The data plane refuses shared-key auth.
+- `provider "azurerm" { storage_use_azuread = true }` is set so `terraform plan` reads storage data-plane sub-properties via Entra ID instead of shared keys. Do not remove this while `shared_access_key_enabled = false` — the pair is required (see `handoff/KNOWN_RISKS.md` #12).
+- The role assignment is gated by `var.enable_storage_role_assignment` (default `false` in `variables.tf`, set to `true` in dev `terraform.tfvars`). Do not flip the dev value to `false` — it would plan a destroy of the role assignment and break runtime blob auth.
+
+**Auth surface (Task B, backend image v28+):**
+- slowapi rate limit on `/auth/login` (5/min) and `/auth/refresh` (20/min) with XFF-aware port-stripping client-IP key. Limiter is constructed with `headers_enabled=False` to avoid the v26 `_inject_headers` bug.
+- `OriginCheckMiddleware` blocks unsafe methods (`POST/PUT/PATCH/DELETE`) with bad/missing `Origin`/`Referer`.
+- Backend container runs as non-root `app:1001` (`backend/Dockerfile.azure`).
+
+**Credentials (Task A, backend image v25+):**
+- `WEAK_SECRET_KEYS` validator in `backend/app/config.py` refuses placeholder/short JWT keys when `APP_ENV=production`.
+- FastAPI docs disabled in production via `_docs_kwargs` in `backend/app/main.py`.
+- Seed script (`scripts/seed.py`) refuses to run in production unless `ENABLE_SEED_DATA=1` AND `ADMIN_INITIAL_PASSWORD` is non-default.
+
+If a future task touches any of these areas, re-read the relevant test file in `backend/tests/test_security_hardening.py` / `test_auth_surface_hardening.py` / `test_db_bootstrap.py` / `test_storage_managed_identity.py` first.
 
 ## Terraform Authentication Rule (load-bearing — read before any Terraform command)
 
@@ -79,6 +109,11 @@ The lifecycle precondition on the Postgres server (`var.postgres_sku_name == "B_
   ```
   `source` only affects the current shell — re-source in a new terminal.
 - `.env.terraform` is **gitignored**. Never commit it. Never echo its contents into logs, transcripts, or commit messages. If you ever see it in `git status`, stop and add it to `.gitignore` before proceeding.
+- Two more files are equally sensitive and equally gitignored:
+  - `terraform/envs/dev/terraform.tfvars` — contains `backend_secret_key` (JWT signing key); compromise means anyone can mint admin tokens.
+  - `terraform/envs/dev/terraform.tfstate` (and `terraform.tfstate.backup`) — contains the auto-generated Postgres `art_admin` password, the `art_app` runtime password, and the storage account access keys (still embedded in state even though `shared_access_key_enabled = false` makes them inert at the data plane).
+  Verify all three are absent from `git status` before every commit. Never `cat`, `grep`, or otherwise echo their contents anywhere.
+- The `storage_account_connection_string` Terraform output is marked `sensitive`; treat it as confidential even though shared-key auth is disabled. **Future hardening:** remove the output from `outputs.tf` once nothing in the workflow needs it.
 - Do not replace the Service Principal flow with a personal Azure login (`az login`, `Connect-AzAccount`, OIDC) without explicit approval — those flows tie credentials to a human user instead of the project's SP and break unattended apply.
 - Do not ask me to install Azure CLI for Terraform. The project does not need it.
 - Run all Terraform commands from `terraform/envs/dev/`.

@@ -71,11 +71,11 @@ variable "backend_image" {
 
 variable "backend_image_tag" {
   type        = string
-  default     = "v21"
-  description = "Backend image tag. v21 makes the products image proxy backend-agnostic — it now streams via storage.download_file() so MinIO and Azure Blob both work; previously the proxy was MinIO-only and 404'd in Azure. v20 baseline: Azure Blob Storage adapter (azure-storage-blob SDK, app/storage/azure_adapter.py, products proxy + worker task switched to the StorageService abstraction). Required for STORAGE_BACKEND=azure. Do NOT use v13 — handoff/KNOWN_RISKS.md #2."
+  default     = "v30"
+  description = "Backend image tag. v30 = Task C2a Storage Managed Identity. Adds azure-identity SDK dep; AzureBlobStorageService now constructs BlobServiceClient(account_url, DefaultAzureCredential()) when AZURE_STORAGE_ACCOUNT_URL is set, falling back to from_connection_string only when it isn't. Adapter logs auth_mode at __init__ for runtime confirmation. v29 baseline = Task C1 PostgreSQL least-privilege runtime user (scripts/bootstrap_db_user.py runs from entrypoint.sh; idempotently creates/grants role `art_app`; runtime DATABASE_URL connects as `art_app`, DATABASE_URL_SYNC stays admin for alembic). v28 = Task B auth-surface hardening (slowapi 5/min login limit with XFF-aware key, OriginCheckMiddleware, non-root container). v25 = Task A. Do NOT use v13 — KNOWN_RISKS.md #2. Do NOT use v26 — slowapi inject-headers bug. Do NOT use v27 — missing XFF port-stripping rendered rate limit inert."
   validation {
-    condition     = var.backend_image_tag != "v13"
-    error_message = "v13 is forbidden — see handoff/KNOWN_RISKS.md #2 (poisoned image, failed migration 009)."
+    condition     = !contains(["v13", "v26", "v27"], var.backend_image_tag)
+    error_message = "v13, v26, v27 are forbidden. v13: poisoned (KNOWN_RISKS.md #2). v26: slowapi inject-headers bug. v27: missing XFF port-stripping → rate limit inert in Azure."
   }
 }
 
@@ -217,9 +217,34 @@ variable "minio_bucket" {
 
 variable "backend_secret_key" {
   type        = string
-  default     = "placeholder-dev-secret-change-me"
-  description = "JWT signing key. Placeholder for Phase 2 — replace via App Settings or Key Vault before any real use."
+  description = <<-EOT
+    JWT signing key. Required — no default. Set the real value in
+    `terraform/envs/dev/terraform.tfvars` (gitignored) or via the
+    `TF_VAR_backend_secret_key` environment variable. Generate with:
+
+        openssl rand -hex 32
+
+    The backend image v25+ refuses to start with APP_ENV=production if this
+    value is a known placeholder, empty, or shorter than 32 characters.
+  EOT
   sensitive   = true
+  validation {
+    condition = !contains([
+      "",
+      "change-me",
+      "changeme",
+      "secret",
+      "placeholder",
+      "placeholder-dev-secret-change-me",
+      "your-secret-key",
+      "your-secret-key-here",
+    ], var.backend_secret_key)
+    error_message = "backend_secret_key is a known weak/placeholder value. Generate a real key with `openssl rand -hex 32` and set it in the gitignored terraform.tfvars."
+  }
+  validation {
+    condition     = length(var.backend_secret_key) >= 32
+    error_message = "backend_secret_key must be at least 32 characters. Generate one with `openssl rand -hex 32`."
+  }
 }
 
 # Phase 3 NOTE: backend_database_url / backend_database_url_sync used to be
@@ -242,6 +267,36 @@ variable "azure_storage_container" {
   type        = string
   default     = "art-images"
   description = "Blob container name for product images. Auto-created by AzureBlobStorageService._ensure_container on first request (idempotent — swallows ResourceExistsError)."
+}
+
+variable "enable_storage_role_assignment" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Two-stage apply gate for the backend Web App's "Storage Blob Data
+    Contributor" role assignment on the storage account (Task C2a).
+
+    When the SystemAssigned identity is being added to an EXISTING
+    azurerm_linux_web_app, Terraform's planner sees identity[0] as null
+    (state pre-apply has identity = []) and rejects the role assignment
+    with "Missing required argument: principal_id". A count guard does
+    not fix this — the planner still resolves the expression eagerly.
+
+    Sequence:
+      1. Stage 1 — keep this false (default), plan/apply: identity block
+         is created on the Web App. Plan shape: 0 add, 3 change, 0 destroy.
+      2. Stage 2 — set this to true (override in terraform.tfvars or
+         pass `-var=enable_storage_role_assignment=true`), plan/apply:
+         role assignment is created. Plan shape: 1 add, 0 change, 0 destroy.
+
+    On a from-scratch apply where the Web App is being CREATED with
+    identity, this can be set to true from the start; identity[0] is
+    correctly marked "known after apply" when the parent is in the
+    plan-add set, and Terraform plans the role assignment in the same
+    pass. The default is false because the dev environment was created
+    before identity was introduced — the gate ensures the first apply
+    after this PR succeeds.
+  EOT
 }
 
 # --- Phase 3: PostgreSQL Flexible Server -------------------------------------

@@ -2,7 +2,7 @@ import { requireAuth } from "@/lib/auth";
 import { serverGet } from "@/lib/api.server";
 import { Product, ProductCategory } from "@/types";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, formatNumber } from "@/lib/utils";
 import Link from "next/link";
 import { EditProductForm } from "../EditProductForm";
 import { DeleteProductButton } from "../ProductActions";
@@ -74,8 +74,8 @@ export default async function ProductDetailPage({
                           <td className="px-6 py-4 text-sm">{v.size}</td>
                           <td className="px-6 py-4 text-sm">{v.color}</td>
                           <td className="px-6 py-4 text-sm">{formatCurrency(v.price)}</td>
-                          <td className="px-6 py-4 text-sm">{v.stock_quantity}</td>
-                          <td className={`px-6 py-4 text-sm ${v.damaged_stock_quantity > 0 ? "text-red-700 font-medium" : "text-gray-400"}`}>{v.damaged_stock_quantity}</td>
+                          <td className="px-6 py-4 text-sm">{formatNumber(v.stock_quantity)}</td>
+                          <td className={`px-6 py-4 text-sm ${v.damaged_stock_quantity > 0 ? "text-red-700 font-medium" : "text-gray-400"}`}>{formatNumber(v.damaged_stock_quantity)}</td>
                         </tr>
                       ))}
                     </tbody>

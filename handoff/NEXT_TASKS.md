@@ -85,10 +85,45 @@ Until then, treat order-based damaged production as **off the roadmap** — do n
 ## Done — Azure deployment milestones
 
 ### Phase 4 — Azure Blob Storage (replaces MinIO sidecar in Azure)
-- `backend/app/storage/azure_adapter.py` is **implemented** (was a placeholder in earlier snapshots). Uses `azure-storage-blob==12.23.1`.
-- Storage Account `startdevimgsart4242` (Standard_LRS, StorageV2, Hot) and private container `art-images` are managed by Terraform in `terraform/envs/dev/main.tf`.
-- Backend image proxy `/api/v1/products/images/file/{key}` is **backend-agnostic** — uses `storage.download_file()` against the abstraction, works with both MinIO (local) and Azure Blob (deployed). v20 backend was MinIO-only and 404'd in Azure for image GETs; v21 is the live backend tag.
-- Default `STORAGE_BACKEND=azure` for deployed envs; `minio` for local docker-compose. `minio_sidecar_enabled = false` is the default in Terraform; the sitecontainer block remains for parity but is disabled.
+- `backend/app/storage/azure_adapter.py` is **implemented** (was a placeholder in earlier snapshots). Uses `azure-storage-blob==12.23.1` + `azure-identity==1.19.0` (added in C2a).
+- Storage Account `startdevimgsart4242` (Standard_LRS, StorageV2, Hot) and private container `art-images` are managed by Terraform in `terraform/envs/dev/main.tf`. **`shared_access_key_enabled = false`** since Task C2b — only Entra ID/Managed Identity tokens are accepted.
+- Backend image proxy `/api/v1/products/images/file/{key}` is **backend-agnostic** — uses `storage.download_file()` against the abstraction, works with both MinIO (local) and Azure Blob (deployed). v20 backend was MinIO-only and 404'd in Azure for image GETs; v30 is the current live backend tag.
+- Default `STORAGE_BACKEND=azure` for deployed envs; `minio` for local docker-compose. `minio_sidecar_enabled = false` is the default in Terraform; the sitecontainer block remains for parity but is disabled. **Never enable MinIO in Azure** — it's local-dev-only.
+
+### Tasks A / B / C — Security hardening (done)
+
+#### Task A — Critical credentials hardening (deployed v25)
+- `WEAK_SECRET_KEYS` validator in `backend/app/config.py` refuses placeholder/short keys when `APP_ENV=production`. `terraform/envs/dev/variables.tf` has the matching validation on `var.backend_secret_key`.
+- FastAPI docs (`/docs`, `/redoc`, `/openapi.json`) are gated by `_docs_kwargs` helper in `backend/app/main.py` — disabled in production.
+- Seed script (`backend/scripts/seed.py`) refuses to run in production unless `ENABLE_SEED_DATA=1` AND `ADMIN_INITIAL_PASSWORD` is non-default.
+- Tests: `backend/tests/test_security_hardening.py`.
+
+#### Task B — Auth surface hardening (deployed v28)
+- slowapi rate limit: 5/min on `/auth/login`, 20/min on `/auth/refresh`. `_client_ip` key reads `X-Forwarded-For`, strips the ephemeral source port Azure App Service prepends to each entry, falls back to `request.client.host`. `headers_enabled=False` on Limiter to avoid `_inject_headers` raising on dict-return endpoints.
+- `OriginCheckMiddleware` (`backend/app/origin_check.py`) blocks `POST/PUT/PATCH/DELETE` with bad/missing `Origin`/`Referer` — defends against CSRF.
+- Backend container runs as non-root `app:1001` (`backend/Dockerfile.azure`).
+- Tests: `backend/tests/test_auth_surface_hardening.py` (Origin checks + `_client_ip` port-stripping + rate-limit wiring).
+- v26 (slowapi `headers_enabled=True` bug) and v27 (missing port-strip) are blacklisted in `terraform/envs/dev/variables.tf`.
+
+#### Task C1 — PostgreSQL least-privilege runtime user (deployed v29)
+- `backend/scripts/bootstrap_db_user.py` runs from `entrypoint.sh` AFTER Alembic and BEFORE uvicorn. Idempotent: creates `art_app` if missing, `ALTER ROLE art_app WITH PASSWORD <ART_APP_DB_PASSWORD>`, then re-grants `CONNECT` on the database, `USAGE` on schema `public`, `SELECT/INSERT/UPDATE/DELETE` on tables and sequences, plus `ALTER DEFAULT PRIVILEGES` for future objects.
+- Runtime `DATABASE_URL` connects as `art_app` (CRUD only, no DDL, no role management).
+- `DATABASE_URL_SYNC` retains the `art_admin` admin for Alembic + bootstrap. After Alembic + bootstrap finish, uvicorn uses the runtime DSN; the admin DSN is no longer accessed.
+- Terraform: `random_password.art_app_db` (24-char URL-safe), `ART_APP_DB_PASSWORD` app setting, `postgres_app_password` output (sensitive).
+- Tests: `backend/tests/test_db_bootstrap.py` (gate logic, password validator, role-name lock-in, source scan for hardcoded passwords).
+
+#### Task C2a — Storage Managed Identity (deployed v30)
+- Backend Web App has `identity { type = "SystemAssigned" }` (principal_id `8b108e0c-10af-4d3d-9a34-5f372f684064`).
+- Granted `Storage Blob Data Contributor` on the storage account scope via `azurerm_role_assignment.backend_blob_data_contributor[0]`.
+- Backend adapter (`backend/app/storage/azure_adapter.py`) selects auth path at `__init__`: MI when `AZURE_STORAGE_ACCOUNT_URL` is set, else connection string. New dependency: `azure-identity==1.19.0`.
+- Two-stage apply pattern: `var.enable_storage_role_assignment` (default `false`) gates the role assignment so the planner doesn't fail on `identity[0]` being null when adding identity to an existing Web App. The dev env's `terraform.tfvars` sets it to `true` post-bootstrap.
+- Tests: `backend/tests/test_storage_managed_identity.py` (auth-mode branch logic, settings field).
+
+#### Task C2b — Storage shared-key denial
+- `AZURE_STORAGE_CONNECTION_STRING` removed from backend `app_settings` in `main.tf`.
+- `azurerm_storage_account.images.shared_access_key_enabled = false` — shared-key auth blocked at the data plane.
+- Provider configured with `storage_use_azuread = true` in `providers.tf` so `terraform plan` can read storage account data-plane sub-properties (`queue_properties`, etc.) via the SP's Entra ID token instead of shared keys. The SP must hold a Storage data-plane role (currently inherited from subscription Owner). If SP is downgraded, grant `Storage Blob Data Owner` on the storage account explicitly.
+- Live verification: end-to-end image upload + read + delete succeed via MI (MD5 round-trip match), 404 on deleted blob.
 
 ### Phase 5 — Multi-image product gallery
 - `frontend/src/components/products/ProductCardImage.tsx` (new) — card-sized clickable thumbnail with built-in fullscreen lightbox (prev/next/thumbnails, Esc/←/→ keyboard, "+N" badge, Armenian aria-labels). Used by the catalog page and the homepage `FeaturedProducts`.
@@ -101,13 +136,19 @@ Until then, treat order-based damaged production as **off the roadmap** — do n
 
 ### Image tag history (Azure deployment)
 
-Live: `art-frontend:v24`, `art-backend:v21`. Blacklisted in `terraform/envs/dev/variables.tf` validation:
+Live: `art-frontend:v24`, `art-backend:v30`. Blacklisted in `terraform/envs/dev/variables.tf` validation:
 
 | Tag | Reason retired |
 |---|---|
 | `art-backend:v13` | Failed migration `009`; the boot guard exists to recover from it. See `KNOWN_RISKS.md` #2. |
+| `art-backend:v26` | Task B regression: slowapi `headers_enabled=True` + dict-return endpoints raised inside `_inject_headers`, short-circuiting the rate limiter. |
+| `art-backend:v27` | Task B regression: missing XFF port-strip; Azure App Service prepends ephemeral source ports to each XFF entry, so every request landed in a fresh rate-limit bucket and the limit never fired. |
 | `art-frontend:v21` | Built from `frontend/Dockerfile` (dev mode `npm run dev`); crashed in Azure with `Module parse failed: Unexpected character '@'` on Tailwind globals.css under `NODE_ENV=production`. Always use `frontend/Dockerfile.azure` for production builds. |
 | `art-frontend:v22` and `v23` | Built from Git Bash on Windows without `MSYS_NO_PATHCONV=1`; MSYS rewrote `--build-arg NEXT_PUBLIC_API_URL=/api/v1` to `C:/Program Files/Git/api/v1`, which webpack inlined into every `clientFetch` call. Every browser-side fetch threw `TypeError: Failed to fetch`. SSR was unaffected. v22 was the symptomless variant; v23 surfaced the bug because its modal's defensive logic exposed it. See `KNOWN_RISKS.md` #8. |
+
+Backend tag lineage (live progression):
+- `v21` → `v25` (Task A) → `v28` (Task B) → `v29` (Task C1) → `v30` (Task C2a/b — current).
+- v25, v28, v29 are retired but not blacklisted; rolling back to one of them to triage a new regression is permitted (would temporarily restore connection-string auth + admin-as-runtime-DB-user, both undesirable).
 
 When publishing a new frontend tag from Git Bash on Windows, **always** set `MSYS_NO_PATHCONV=1` and verify the bundle is clean before pushing — see CLAUDE.md "Building Docker images on Windows / Git Bash" for the verification command.
 
@@ -118,6 +159,9 @@ When publishing a new frontend tag from Git Bash on Windows, **always** set `MSY
 - **`hoso30/art-backend:v13` cached image is poisoned** — see `KNOWN_RISKS.md` #2 and `ROLLBACK_NOTES.md`. Any future backend image publish must be a fresh build with `--no-cache`.
 - **Local main Postgres DB stamp is stale** — `art_manufacturing` is stamped at `006_order_item_fulfillment` but the schema already contains 007/008 tables (an artifact of the v13 rollback). `alembic upgrade head` against it fails with `DuplicateTable`. Migration 010 itself is fine; verified on a clean temp DB. Local fix would be `UPDATE alembic_version SET version_num = '008_activity_log_columns'` but explicit approval is required before writing to the main local DB. Azure deploys against the Flexible Server run all migrations cleanly because that DB was created fresh.
 - **PostgreSQL is in North Europe** while every other resource is in West Europe (`LocationIsOfferRestricted` exception). When the West Europe block is lifted, set `postgres_location = "West Europe"` in tfvars and re-apply (recreates the server — `pg_dump` first if there is data to keep).
+- **Service Principal is currently Owner; downgrading needs RBAC follow-up** — Owner was elevated for Task C2a (role-assignment creation) and is currently retained because `storage_use_azuread = true` (set in C2b) needs the SP to have a Storage data-plane role to read storage sub-properties on every plan. If you downgrade the SP back to Resource Manager `Contributor`, grant explicit `Storage Blob Data Owner` on `azurerm_storage_account.images` first, or `terraform plan` will start 403'ing. Either way, document the elevation event here and in `handoff/SAFE_TASK_RULES.md` "Service Principal role for Terraform".
+- **`storage_account_connection_string` output still exists** — kept for break-glass debugging. Even with `shared_access_key_enabled = false`, the output embeds the storage account access key (still present in the resource for control-plane purposes). Treat as sensitive. **Future hardening: remove the output entirely** once nothing in the workflow needs it. Tracking: see `terraform/envs/dev/outputs.tf`.
+- **24h soak after C2b** — backend is now MI-only for blob auth. Watch for any 5xx on `/api/v1/products/images/file/{key}` over the next 24h that could indicate transient MI token issues. None observed in initial verification.
 
 ## Explicitly not on the roadmap (do not start)
 

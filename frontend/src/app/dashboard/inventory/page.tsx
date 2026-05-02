@@ -3,6 +3,7 @@ import { serverGet } from "@/lib/api.server";
 import { PaginatedResponse, Material } from "@/types";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { formatNumber } from "@/lib/utils";
 import Link from "next/link";
 import { AddMaterialButton, EditMaterialButton, DeleteMaterialButton } from "./InventoryListActions";
 
@@ -73,8 +74,8 @@ export default async function InventoryPage({
                     <td className="px-6 py-4 text-sm font-medium text-gray-900">{material.name}</td>
                     <td className="px-6 py-4 text-sm text-gray-600 font-mono">{material.sku}</td>
                     <td className="px-6 py-4 text-sm text-gray-600">{material.unit}</td>
-                    <td className="px-6 py-4 text-sm font-medium">{qty}</td>
-                    <td className="px-6 py-4 text-sm text-gray-600">{material.low_stock_threshold}</td>
+                    <td className="px-6 py-4 text-sm font-medium">{formatNumber(qty)}</td>
+                    <td className="px-6 py-4 text-sm text-gray-600">{formatNumber(material.low_stock_threshold)}</td>
                     <td className="px-6 py-4">
                       {isLow ? (
                         <Badge className="bg-red-100 text-red-800">Ցածր մնացորդ</Badge>

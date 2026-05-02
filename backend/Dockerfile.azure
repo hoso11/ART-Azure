@@ -14,6 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Non-root runtime user. Created before installing deps so layer caching is
+# stable; pip install still runs as root because dist-packages live under /usr.
+RUN groupadd --system --gid 1001 app \
+    && useradd --system --uid 1001 --gid app --home-dir /app --shell /usr/sbin/nologin app
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -24,7 +29,10 @@ COPY . .
 # the embedded quotes and produces `alembic: 1: Syntax error: Unterminated
 # quoted string` at startup. A script file has zero quoting for Azure to
 # corrupt.
-RUN chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh \
+    && chown -R app:app /app
+
+USER app
 
 EXPOSE 8000
 

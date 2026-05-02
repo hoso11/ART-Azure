@@ -11,11 +11,13 @@ from app.auth import service as auth_service
 from app.auth.schemas import LoginRequest, AuthResponse
 from app.activity import service as activity_service
 from app.exceptions import UnauthorizedException
+from app.rate_limit import limiter
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
 @router.post("/login")
+@limiter.limit("5/minute")
 async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     user = await get_user_by_email(db, data.email)
     if not user or not verify_password(data.password, user.hashed_password):
@@ -103,6 +105,7 @@ async def logout(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/refresh")
+@limiter.limit("20/minute")
 async def refresh_token(request: Request, db: AsyncSession = Depends(get_db)):
     token = request.cookies.get("refresh_token")
     if not token:
