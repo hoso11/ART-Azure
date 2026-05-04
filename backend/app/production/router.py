@@ -88,6 +88,41 @@ async def create_production_batch(
     return schemas.ProductionBatchResponse.model_validate(batch)
 
 
+@router.post(
+    "/batches/bulk",
+    response_model=schemas.ProductionBatchBulkResponse,
+    status_code=201,
+)
+async def create_production_batches_bulk(
+    data: schemas.ProductionBatchBulkCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
+):
+    batches = await service.create_production_batches_bulk(
+        db,
+        product_id=data.product_id,
+        items=data.items,
+        created_by=admin.id,
+    )
+    for batch in batches:
+        await activity_service.log_activity(
+            db, user=admin, request=request,
+            action="production.batch_created", entity_type="production_batch", entity_id=batch.id,
+            new_values={
+                "product_id": batch.product_id,
+                "variant_id": batch.variant_id,
+                "quantity_to_produce": batch.quantity_to_produce,
+                "current_stage": batch.current_stage,
+                "stage_status": batch.stage_status,
+                "materials_deducted": batch.materials_deducted,
+            },
+        )
+    return schemas.ProductionBatchBulkResponse(
+        items=[schemas.ProductionBatchResponse.model_validate(b) for b in batches],
+    )
+
+
 @router.get("/batches", response_model=schemas.ProductionBatchListResponse)
 async def list_production_batches(
     page: int = Query(1, ge=1),

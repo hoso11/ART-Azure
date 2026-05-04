@@ -41,7 +41,77 @@ State of each in-flight workstream. "Done" means landed in the current commit on
 - Migration `007_production_batches`.
 - Tests in `backend/tests/test_production_batches.py` cover the deduction-once and stock-once invariants.
 
-## Done (deployed v35 / v32, this commit)
+## Done (deployed v36 / v33, this commit)
+
+### Bulk / series production batch creation (Շարք)
+
+Admin can now create multiple `ProductionBatch` rows in a single request from the `Նոր արտադրություն` modal. The single-create path is unchanged.
+
+**Backend API.** New endpoint `POST /api/v1/production/batches/bulk` (gate: `BUSINESS_MANAGER` — admin / director / production_manager). Request: `{product_id, items: [{variant_id, quantity_to_produce}]}`. Response: `{items: [<ProductionBatchResponse>]}`.
+
+**Atomic, all-or-nothing.** Service `create_production_batches_bulk` (in `backend/app/production/service.py`) validates everything before any DB write:
+
+- Pydantic-level: `1 <= len(items) <= 50`, no duplicate `variant_id`, `quantity_to_produce >= 1`.
+- Variant-belongs-to-product check via a single `SELECT … FOR UPDATE`.
+- Size-keyed `ProductSizeMaterialRequirement` rows must exist for every variant size.
+- Materials are aggregated across the whole request (`material_id → SUM(qty_per_item * quantity_to_produce)`) and the aggregated requirement is checked against `Inventory` once.
+- If any check fails: `ValidationException` rolls back the whole transaction — no batches, no stock movements.
+- If checks pass: one `StockMovement` per material (with the *summed* deduction; reason `stock_based_production` — same as single-create, no ENUM change), then one `ProductionBatch` per item with the existing defaults.
+- Router emits one `production.batch_created` audit row per created batch — identical shape to N single-creates.
+
+**No DB migration.** `ProductionBatch` schema unchanged. `StockMovementReason` ENUM unchanged. Alembic head remains `012_extend_user_roles`.
+
+**Error codes:** `variant_not_found_or_wrong_product` (422, lists offending ids), `duplicate_variant` (422), `empty_items` (422 — defensive; Pydantic catches the API path), `too_many_items` (422 — defensive), plus the existing `invalid_quantity` / `no_material_requirements` / `insufficient_materials`. Pydantic returns its standard 422 detail array for `min_length=1` / `max_length=50` / `ge=1` violations.
+
+**Frontend.** `frontend/src/app/dashboard/production/CreateBatchModal.tsx` is split into Single ↔ Շարք tabs:
+
+- **Single mode** is unchanged — same fields, same submit, same payload to `POST /production/batches`.
+- **Շարք mode** after a product is selected: a per-variant table (checkbox / `Չափս` / `Գույն` / `Մնացորդ` / `Քանակ`), a common-quantity input + `Կիրառել ընտրվածներին` button (writes the common qty into every selected row's qty input — manual override still possible per row), an `Ընտրել ըստ գույնի` helper (pick a color, click `Ընտրել`), a footer counter ("Ընտրված է՝ N տարբերակ · ընդհանուր քանակ՝ M"), and a `Չեղարկել ընտրությունը` link. Submit is disabled while no variants are selected, any selected qty < 1, the count exceeds 50, or a request is in flight. On 2xx the modal closes immediately and toasts `Ստեղծվեց N արտադրություն`.
+
+**Size ordering / "S → XL" helper intentionally not in v1** — sizes are free-form `String(50)` on `ProductVariant`. Adding a canonical-order constant or a `ProductVariant.sort_order` column is parked as a possible follow-up.
+
+**Tests:** 16 new cases in `backend/tests/test_production_batches.py` — happy path, aggregate-shortage rollback, wrong-product variant rolls back, duplicate / empty / oversized / qty=0 rejected, missing material requirements rejected, audit emits one row per created batch, single-create still works, **one `StockMovement` per material** verified via `/inventory/materials/{id}/movements`, RBAC matrix `admin` / `director` / `production_manager` succeed and `warehouse_manager` / `simple_user` 403.
+
+**Live verification (deployed 2026-05-04):**
+
+- `/ready` 200, `/` 200, `/dashboard/production` 200.
+- Three smoke probes against `POST /production/batches/bulk` returned the expected 422 with the expected codes (`variant_not_found_or_wrong_product`, Pydantic `min_length`, `value_error duplicate variant_id`) — no batches created during smoke.
+- Frontend bundle (`hoso30/art-frontend:v33`) contains the five new Armenian strings (`Մեկական`, `Շարք`, `Ընդհանուր քանակ`, `Կիրառել ընտրվածներին`, `Ընտրել ըստ գույնի`) and the endpoint URL `/production/batches/bulk` baked into compiled chunks.
+- Plan summary: `0 to add, 3 to change, 0 to destroy`. No protected-resource changes (PostgreSQL server / database / Storage Account / container / management locks all untouched).
+- Manual click-through by the user confirmed the Շարք mode end-to-end.
+
+**Known residual risk — server-side idempotency.** The bulk endpoint has no `Idempotency-Key` support. A network-level retry after a successful POST could create a duplicate set of batches and double-deduct materials. The single-create endpoint has the same risk (pre-existing). Mitigations in place: the frontend disables submit while the request is in flight, closes the modal on 2xx (so the only retry path is "reopen modal + re-confirm"), and the Pydantic 50-item cap bounds blast radius. **Possible follow-up task:** add `Idempotency-Key` request-header support backed by a small `idempotency_keys` table — propose separately if needed.
+
+#### Rollback (bulk v36 / v33 → previous live)
+
+The previous live tags `v35` (backend) / `v32` (frontend) are still in the registry. **No DB rollback needed for this task** — no migration was applied. v36 → v35 is a clean image-tag flip.
+
+1. Edit `terraform/envs/dev/terraform.tfvars`:
+   ```
+   backend_image_tag  = "v35"
+   frontend_image_tag = "v32"
+   ```
+2. From `terraform/envs/dev/`:
+   ```bash
+   source .env.terraform
+   terraform plan -out=tfplan
+   ```
+   Expected plan: **0 to add, 3 to change, 0 to destroy** — `azapi_resource.backend_main`, `azapi_resource.backend_worker[0]`, `azurerm_linux_web_app.frontend` revert to v35 / v32. Verify the plan shows **no** changes to the four protected data resources (PostgreSQL server / database, Storage Account / container) or the two `azurerm_management_lock` resources.
+3. `terraform apply tfplan` (~40–80 s).
+4. Smoke check:
+   ```bash
+   curl -sS -o /dev/null -w "%{http_code}\n" "$(terraform output -raw frontend_url)/"
+   curl -sS -o /dev/null -w "%{http_code}\n" "$(terraform output -raw backend_url)/ready"
+   terraform output | grep -E "deployed_image|backend_image"  # → v32 / v35
+   ```
+
+**Caveats:**
+
+- The `POST /production/batches/bulk` endpoint disappears on rollback (404 on v35). The v32 frontend doesn't render the Շարք tab, so flipping both tags together is the clean path. Do **not** roll back backend without also rolling back the frontend.
+- **Bulk batches already created on v36 stay valid after rollback.** They're regular `ProductionBatch` rows with the existing schema — they appear in the production list, can be completed via the normal `/complete` endpoint, and don't depend on the bulk endpoint to exist.
+- **Materials already deducted stay deducted.** No double-deduction risk on rollback (the `StockMovement` ledger is append-only and Inventory is already at the post-deduction state).
+
+## Done (deployed v35 / v32, prior commit)
 
 ### RBAC — five user roles with backend authorization matrix
 
@@ -276,7 +346,7 @@ Until then, treat order-based damaged production as **off the roadmap** — do n
 
 ### Image tag history (Azure deployment)
 
-Live: `art-frontend:v32`, `art-backend:v35`. Blacklisted in `terraform/envs/dev/variables.tf` validation:
+Live: `art-frontend:v33`, `art-backend:v36`. Blacklisted in `terraform/envs/dev/variables.tf` validation:
 
 | Tag | Reason retired |
 |---|---|
@@ -287,13 +357,27 @@ Live: `art-frontend:v32`, `art-backend:v35`. Blacklisted in `terraform/envs/dev/
 | `art-frontend:v22` and `v23` | Built from Git Bash on Windows without `MSYS_NO_PATHCONV=1`; MSYS rewrote `--build-arg NEXT_PUBLIC_API_URL=/api/v1` to `C:/Program Files/Git/api/v1`, which webpack inlined into every `clientFetch` call. Every browser-side fetch threw `TypeError: Failed to fetch`. SSR was unaffected. v22 was the symptomless variant; v23 surfaced the bug because its modal's defensive logic exposed it. See `KNOWN_RISKS.md` #8. |
 
 Backend tag lineage (live progression):
-- `v21` → `v25` (Task A) → `v28` (Task B) → `v29` (Task C1) → `v30` (Task C2a/b) → `v31` (orders dropdown UX) → `v32` (partial production batches) → `v33` (sales per-customer) → `v34` (sales per-order) → **`v35` (RBAC five roles, migration `012_extend_user_roles`) — current**.
-- v25, v28, v29, v30, v31, v32, v33, v34 are retired but not blacklisted. Rolling back to a pre-v35 tag is conditional — see "RBAC ENUM extension is forward-only" in `KNOWN_RISKS.md` #14 and `ROLLBACK_NOTES.md`.
+- `v21` → `v25` (Task A) → `v28` (Task B) → `v29` (Task C1) → `v30` (Task C2a/b) → `v31` (orders dropdown UX) → `v32` (partial production batches) → `v33` (sales per-customer) → `v34` (sales per-order) → `v35` (RBAC five roles, migration `012_extend_user_roles`) → **`v36` (bulk production batch creation, no migration) — current**.
+- v25, v28, v29, v30, v31, v32, v33, v34, v35 are retired but not blacklisted. Rolling back to a pre-v35 tag is conditional — see "RBAC ENUM extension is forward-only" in `KNOWN_RISKS.md` #14 and `ROLLBACK_NOTES.md`. Rolling back v36 → v35 is unconditional (no migration was applied for the bulk task; `POST /production/batches/bulk` simply disappears).
 
 Frontend tag lineage (live progression):
-- `v24` (post-MSYS-fix baseline) → `v25`–`v27` (orders UX) → `v28` (production page) → `v29` (per-customer reports) → `v30` (limit fix) → `v31` (per-order reports) → **`v32` (RBAC permissions, sidebar/route/user-form gating) — current**.
+- `v24` (post-MSYS-fix baseline) → `v25`–`v27` (orders UX) → `v28` (production page) → `v29` (per-customer reports) → `v30` (limit fix) → `v31` (per-order reports) → `v32` (RBAC permissions, sidebar/route/user-form gating) → **`v33` (bulk production modal — Single ↔ Շարք toggle) — current**.
 
 When publishing a new frontend tag from Git Bash on Windows, **always** set `MSYS_NO_PATHCONV=1` and verify the bundle is clean before pushing — see CLAUDE.md "Building Docker images on Windows / Git Bash" for the verification command.
+
+## Possible follow-ups (not started)
+
+### Server-side `Idempotency-Key` for production batch creation
+The single-create and bulk-create endpoints both lack idempotency. A network-level retry after a successful POST would create duplicate batches and double-deduct materials. The current frontend mitigation (disable submit while in flight, close modal on 2xx, reopen-and-reconfirm to retry) is good enough for typical usage but not race-proof.
+
+A clean implementation would add `Idempotency-Key` request-header support, backed by a small `idempotency_keys(key, user_id, request_hash, response_blob, created_at)` table. Replay returns the original response without touching `Inventory`. Affects both single and bulk endpoints; covers more than this task. Propose separately if the duplicate-on-retry risk becomes load-bearing.
+
+### Variant `sort_order` for bulk size selection
+`ProductVariant.size` is free-form `String(50)`; the bulk modal therefore intentionally does **not** offer an "S → XL" range helper because we cannot assume a canonical order. If the client wants robust ordering across non-standard sizes, options:
+- Add `ProductVariant.sort_order INT NOT NULL DEFAULT 0` (Alembic migration, default 0 is safe for existing data) and sort the variants table by `(sort_order, size)`.
+- Or maintain a hard-coded canonical-order constant on the frontend and use it only when every displayed size matches an entry; otherwise hide the range helper.
+
+Both are forward-compatible with the current bulk endpoint — no API change.
 
 ## Watch (no action, but follow-ups exist)
 

@@ -191,6 +191,24 @@ This fired during Task C2b: the first apply succeeded in flipping `shared_access
 - If the SP is downgraded to Resource Manager `Contributor` only (control-plane), grant explicit `Storage Blob Data Owner` on `azurerm_storage_account.images` BEFORE the downgrade or all subsequent plans 403. See `handoff/SAFE_TASK_RULES.md` "Service Principal role for Terraform".
 - Do not remove `storage_use_azuread = true` from `providers.tf` while `shared_access_key_enabled = false`. The pair is required.
 
+## 15. Production batch creation has no server-side idempotency (single + bulk)
+
+What this is: neither `POST /api/v1/production/batches` (single) nor `POST /api/v1/production/batches/bulk` (added in v36) accepts an idempotency key. A network-level retry after a successful POST will create a second copy of every batch and **double-deduct materials**. The bulk endpoint amplifies the impact — one retry can create up to 50 duplicate batches and one extra aggregated `StockMovement` per material.
+
+Mitigations currently in place (frontend-only, not race-proof):
+
+- `frontend/src/app/dashboard/production/CreateBatchModal.tsx` disables the submit button while a request is in flight.
+- On 2xx the modal closes immediately, so the only retry path is "reopen modal + re-confirm intent".
+- Pydantic caps `len(items) <= 50` on bulk requests, bounding the blast radius if a bug doubles the array.
+
+**Rules:**
+
+- Do not loosen any of the frontend mitigations without first adding a server-side idempotency key.
+- Do not raise the bulk cap above 50 without re-evaluating the duplicate-on-retry risk model.
+- Do not reorder the bulk service so deductions happen before validation. The current order (validate everything → deduct materials → create batches) is what makes the rollback path clean: a `ValidationException` after partial validation rolls everything back via `get_db`, but a `ValidationException` after partial deduction would also roll back, so reordering would only obscure the invariant — keep validation first.
+- The bulk service must use the existing `stock_based_production` `StockMovementReason` enum value (no migration). Do not introduce a new reason value (e.g. `stock_based_production_bulk`) without a Postgres ENUM extension migration — see incident in `handoff/ROLLBACK_NOTES.md` "RBAC ENUM extension is forward-only" for the cost of extending an enum.
+- Adding `Idempotency-Key` support is a possible future task (see `NEXT_TASKS.md` "Possible follow-ups"). Until then, flag duplicate-batch incidents to surface this gap rather than silently de-duplicating after the fact.
+
 ## 14. RBAC userrole ENUM is forward-only — rollback to a pre-v35 backend is conditional
 
 What changed: migration `012_extend_user_roles` added `director`, `production_manager`, `warehouse_manager` to the existing `userrole` Postgres ENUM via three idempotent `ALTER TYPE userrole ADD VALUE IF NOT EXISTS …` statements. The migration is non-destructive and idempotent on the way up. **It is forward-only** — Postgres does not support `ALTER TYPE … DROP VALUE`, so the new values cannot be removed without dropping and recreating the type and column, which is destructive.

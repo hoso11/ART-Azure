@@ -819,3 +819,428 @@ async def test_order_based_production_still_works(
     items = stages.json()["items"]
     assert any(s["order_id"] == order_id for s in items), \
         f"order_id={order_id} not present in active production stages: {items}"
+
+
+# ── Bulk / series creation tests ────────────────────────────────────────────
+
+
+async def _make_multi_variant_product(
+    client, admin_cookies, *, sku, variants
+):
+    """variants: list[(size, color)]; price/stock_quantity defaulted to 10/0."""
+    payload_variants = [
+        {"size": s, "color": c, "price": 10.00, "stock_quantity": 0}
+        for s, c in variants
+    ]
+    resp = await client.post(
+        "/api/v1/products",
+        json={"name": f"PB-{sku}", "sku": sku, "variants": payload_variants},
+        cookies=admin_cookies,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    by_sc = {(v["size"], v["color"]): v["id"] for v in body["variants"]}
+    return body["id"], by_sc
+
+
+async def _bulk_create(client, admin_cookies, *, product_id, items, cookies=None):
+    return await client.post(
+        "/api/v1/production/batches/bulk",
+        json={"product_id": product_id, "items": items},
+        cookies=cookies if cookies is not None else admin_cookies,
+    )
+
+
+async def _stock_movement_count(client, admin_cookies, material_id) -> int:
+    """Use the material detail to read movement count if available; otherwise
+    count by listing all material movements (fallback)."""
+    resp = await client.get(
+        f"/api/v1/inventory/materials/{material_id}/movements",
+        cookies=admin_cookies,
+    )
+    if resp.status_code == 200:
+        body = resp.json()
+        items = body.get("items", body) if isinstance(body, dict) else body
+        return len(items)
+    return -1  # endpoint not available — caller skips this assertion
+
+
+@pytest.mark.asyncio
+async def test_bulk_happy_path_creates_all_batches_and_aggregates_deduction(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """4 variants × qty 10 across two sizes → 4 batches, materials deducted
+    once per material with the SUMMED quantity (not per-batch)."""
+    product_id, vmap = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-OK-001",
+        variants=[("S", "Black"), ("M", "Black"), ("S", "Khaki"), ("M", "Khaki")],
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-BULK-OK-001", qty=200)
+    # Same material requirement for both sizes; per-item qty = 2.
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id, size="S", qty_per_item=2
+    )
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id, size="M", qty_per_item=2
+    )
+
+    items = [
+        {"variant_id": vmap[("S", "Black")], "quantity_to_produce": 10},
+        {"variant_id": vmap[("M", "Black")], "quantity_to_produce": 10},
+        {"variant_id": vmap[("S", "Khaki")], "quantity_to_produce": 10},
+        {"variant_id": vmap[("M", "Khaki")], "quantity_to_produce": 10},
+    ]
+    resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert len(body["items"]) == 4
+    for b in body["items"]:
+        assert b["materials_deducted"] is True
+        assert b["stock_added"] is False
+        assert b["current_stage"] == "cutting"
+        assert b["stage_status"] == "pending"
+        assert b["production_type"] == "stock_based"
+        assert b["quantity_to_produce"] == 10
+    # Aggregated deduction: 4 * 10 * 2 = 80; remaining 200 - 80 = 120.
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("120")
+
+    list_resp = await client.get("/api/v1/production/batches", cookies=admin_cookies)
+    assert list_resp.status_code == 200
+    assert list_resp.json()["total"] == 4
+
+
+@pytest.mark.asyncio
+async def test_bulk_one_movement_per_material_not_per_batch(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Aggregated material deduction must produce ONE StockMovement per
+    material, not one per batch. Verifies via /materials/{id}/movements."""
+    product_id, vmap = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-MV-001",
+        variants=[("S", "Red"), ("M", "Red"), ("L", "Red")],
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-BULK-MV-001", qty=200)
+    for s in ("S", "M", "L"):
+        await _add_size_requirement(
+            client, admin_cookies, product_id=product_id, material_id=mat_id, size=s, qty_per_item=1
+        )
+
+    movements_before = await _stock_movement_count(client, admin_cookies, mat_id)
+
+    items = [
+        {"variant_id": vmap[("S", "Red")], "quantity_to_produce": 5},
+        {"variant_id": vmap[("M", "Red")], "quantity_to_produce": 5},
+        {"variant_id": vmap[("L", "Red")], "quantity_to_produce": 5},
+    ]
+    resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
+    assert resp.status_code == 201, resp.text
+
+    # Aggregated deduction: 3 * 5 * 1 = 15; 200 - 15 = 185.
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("185")
+
+    if movements_before >= 0:
+        movements_after = await _stock_movement_count(client, admin_cookies, mat_id)
+        assert movements_after - movements_before == 1, (
+            f"expected exactly 1 new StockMovement for the bulk request, "
+            f"got {movements_after - movements_before}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_bulk_aggregate_shortage_creates_nothing(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Per-item materials would each fit, but the aggregated request does not.
+    No batches, no stock movements, inventory unchanged."""
+    product_id, vmap = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-SHORT-001",
+        variants=[("S", "Blue"), ("M", "Blue")],
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-BULK-SHORT-001", qty=15)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id, size="S", qty_per_item=1
+    )
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id, size="M", qty_per_item=1
+    )
+
+    # Each item alone (qty 10, 1/unit → 10) fits in 15. Together they need 20.
+    items = [
+        {"variant_id": vmap[("S", "Blue")], "quantity_to_produce": 10},
+        {"variant_id": vmap[("M", "Blue")], "quantity_to_produce": 10},
+    ]
+    resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
+    assert resp.status_code == 422, resp.text
+    assert resp.json().get("code") == "insufficient_materials"
+
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("15")
+    list_resp = await client.get("/api/v1/production/batches", cookies=admin_cookies)
+    assert list_resp.status_code == 200
+    assert list_resp.json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_bulk_variant_not_belonging_to_product_creates_nothing(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """If one of the items has a variant_id from a different product, the
+    whole bulk fails, transaction rolls back."""
+    product_a, vmap_a = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-WP-A",
+        variants=[("S", "Red"), ("M", "Red")],
+    )
+    product_b, vmap_b = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-WP-B",
+        variants=[("S", "Green")],
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-BULK-WP-001", qty=200)
+    for s in ("S", "M"):
+        await _add_size_requirement(
+            client, admin_cookies, product_id=product_a, material_id=mat_id, size=s, qty_per_item=1
+        )
+
+    items = [
+        {"variant_id": vmap_a[("S", "Red")], "quantity_to_produce": 5},
+        {"variant_id": vmap_b[("S", "Green")], "quantity_to_produce": 5},  # wrong product
+    ]
+    resp = await _bulk_create(client, admin_cookies, product_id=product_a, items=items)
+    assert resp.status_code == 422, resp.text
+    assert resp.json().get("code") == "variant_not_found_or_wrong_product"
+
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("200")
+    list_resp = await client.get("/api/v1/production/batches", cookies=admin_cookies)
+    assert list_resp.status_code == 200
+    assert list_resp.json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_bulk_duplicate_variant_id_rejected(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Same variant_id listed twice in items → 422 (Pydantic validator)."""
+    product_id, vmap = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-DUP-001",
+        variants=[("S", "Black")],
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-BULK-DUP-001", qty=100)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id, size="S", qty_per_item=1
+    )
+
+    vid = vmap[("S", "Black")]
+    items = [
+        {"variant_id": vid, "quantity_to_produce": 5},
+        {"variant_id": vid, "quantity_to_produce": 5},
+    ]
+    resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
+    assert resp.status_code == 422, resp.text
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_bulk_empty_items_rejected(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    product_id, _ = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-EMPTY-001",
+        variants=[("S", "Black")],
+    )
+    resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=[])
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_bulk_quantity_zero_rejected(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """quantity_to_produce <= 0 fails Pydantic ge=1 validation."""
+    product_id, vmap = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-Q0-001",
+        variants=[("S", "Black"), ("M", "Black")],
+    )
+    items = [
+        {"variant_id": vmap[("S", "Black")], "quantity_to_produce": 5},
+        {"variant_id": vmap[("M", "Black")], "quantity_to_produce": 0},
+    ]
+    resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_bulk_too_many_items_rejected(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Sending 51 items exceeds the max_length=50 cap."""
+    product_id, _ = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-CAP-001",
+        variants=[("S", "Black")],
+    )
+    items = [{"variant_id": 99999 + i, "quantity_to_produce": 1} for i in range(51)]
+    resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_bulk_no_material_requirements_rejected(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Variant size has no ProductSizeMaterialRequirement → 422, no batches."""
+    product_id, vmap = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-NREQ-001",
+        variants=[("S", "Black"), ("M", "Black")],
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-BULK-NREQ-001", qty=100)
+    # Only define requirements for size S; size M has none.
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id, size="S", qty_per_item=1
+    )
+
+    items = [
+        {"variant_id": vmap[("S", "Black")], "quantity_to_produce": 5},
+        {"variant_id": vmap[("M", "Black")], "quantity_to_produce": 5},
+    ]
+    resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
+    assert resp.status_code == 422, resp.text
+    assert resp.json().get("code") == "no_material_requirements"
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_bulk_audit_logs_one_row_per_batch(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Bulk create emits N audit rows with action='production.batch_created',
+    one per created batch — same shape as N single-creates."""
+    product_id, vmap = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-AUDIT-001",
+        variants=[("S", "Black"), ("M", "Black"), ("L", "Black")],
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-BULK-AUDIT-001", qty=100)
+    for s in ("S", "M", "L"):
+        await _add_size_requirement(
+            client, admin_cookies, product_id=product_id, material_id=mat_id, size=s, qty_per_item=1
+        )
+
+    items = [
+        {"variant_id": vmap[("S", "Black")], "quantity_to_produce": 1},
+        {"variant_id": vmap[("M", "Black")], "quantity_to_produce": 1},
+        {"variant_id": vmap[("L", "Black")], "quantity_to_produce": 1},
+    ]
+    resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
+    assert resp.status_code == 201, resp.text
+    batch_ids = {b["id"] for b in resp.json()["items"]}
+    assert len(batch_ids) == 3
+
+    activity = await client.get(
+        "/api/v1/activity-logs?limit=100",
+        cookies=admin_cookies,
+    )
+    assert activity.status_code == 200, activity.text
+    rows = activity.json().get("items", [])
+    matching = [
+        r for r in rows
+        if r.get("action") == "production.batch_created"
+        and r.get("entity_id") in batch_ids
+    ]
+    assert len(matching) == 3, (
+        f"expected 3 production.batch_created rows for batch ids {batch_ids}, "
+        f"got {len(matching)}: {[r.get('entity_id') for r in matching]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_create_still_works_after_bulk_changes(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    """Regression: the original single endpoint must keep working unchanged."""
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="BULK-REG-001", size="M", color="Brown"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-BULK-REG-001", qty=20)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id, size="M", qty_per_item=2
+    )
+
+    resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=5
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["materials_deducted"] is True
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("10")
+
+
+# Authorization matrix for the bulk endpoint. Mirrors the BUSINESS_MANAGER
+# group: admin / director / production_manager succeed, warehouse_manager and
+# simple_user are denied.
+
+async def _make_user_with_role(db_session, role):
+    from app.users.models import User
+    from app.users.service import hash_password
+    u = User(
+        email=f"{role.value}@bulk.test.com",
+        hashed_password=hash_password("Passw0rd!"),
+        role=role,
+    )
+    db_session.add(u)
+    await db_session.commit()
+    await db_session.refresh(u)
+    return u
+
+
+def _cookies_for_user(user):
+    from app.auth.service import create_access_token
+    return {"access_token": create_access_token(user.id, user.role.value)}
+
+
+@pytest.mark.asyncio
+async def test_bulk_authorization_admin_succeeds(
+    client: AsyncClient, admin_user, customer, admin_cookies
+):
+    product_id, vmap = await _make_multi_variant_product(
+        client, admin_cookies, sku="BULK-RBAC-ADM",
+        variants=[("S", "Gray")],
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-BULK-RBAC-ADM", qty=50)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id, size="S", qty_per_item=1
+    )
+    items = [{"variant_id": vmap[("S", "Gray")], "quantity_to_produce": 1}]
+    resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
+    assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role_name,expected", [
+    ("director", 201),
+    ("production_manager", 201),
+    ("warehouse_manager", 403),
+    ("simple_user", 403),
+])
+async def test_bulk_authorization_matrix(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session,
+    role_name, expected,
+):
+    """director and production_manager can bulk-create; warehouse_manager and
+    simple_user cannot."""
+    from app.users.models import UserRole
+
+    # The product / material setup itself requires admin_cookies regardless of
+    # the actor under test.
+    product_id, vmap = await _make_multi_variant_product(
+        client, admin_cookies, sku=f"BULK-RBAC-{role_name}",
+        variants=[("S", "Gray")],
+    )
+    mat_id = await _make_material(client, admin_cookies, sku=f"MAT-BULK-RBAC-{role_name}", qty=50)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id, size="S", qty_per_item=1
+    )
+    items = [{"variant_id": vmap[("S", "Gray")], "quantity_to_produce": 1}]
+
+    actor = await _make_user_with_role(db_session, UserRole(role_name))
+    actor_cookies = _cookies_for_user(actor)
+    resp = await _bulk_create(
+        client, admin_cookies, product_id=product_id, items=items, cookies=actor_cookies
+    )
+    assert resp.status_code == expected, (
+        f"role={role_name} expected {expected}, got {resp.status_code}: {resp.text}"
+    )

@@ -7,9 +7,9 @@ Snapshot as of the most recent verified working tree on `v12`. Future agents: co
 | Component | State | Live value |
 |---|---|---|
 | Resource group | applied | `rg-art-dev` (West Europe) |
-| Frontend Web App | applied, serving | `app-art-frontend-dev-art4242` on `asp-art-dev` (F1 Free) — image `hoso30/art-frontend:v32` |
-| Backend Web App | applied, serving | `app-art-backend-dev-art4242` on `asp-art-backend-dev` (F1 Free) — image `hoso30/art-backend:v35`. **System-Assigned identity** (Task C2a) — principal_id `8b108e0c-10af-4d3d-9a34-5f372f684064`. |
-| Backend `worker` sidecar | applied | image `hoso30/art-backend:v35`, running Celery worker + beat |
+| Frontend Web App | applied, serving | `app-art-frontend-dev-art4242` on `asp-art-dev` (F1 Free) — image `hoso30/art-frontend:v33` |
+| Backend Web App | applied, serving | `app-art-backend-dev-art4242` on `asp-art-backend-dev` (F1 Free) — image `hoso30/art-backend:v36`. **System-Assigned identity** (Task C2a) — principal_id `8b108e0c-10af-4d3d-9a34-5f372f684064`. |
+| Backend `worker` sidecar | applied | image `hoso30/art-backend:v36`, running Celery worker + beat |
 | Backend `redis` sidecar | applied | `redis:7-alpine`, internal-only |
 | Backend `minio` sidecar | disabled | `minio_sidecar_enabled = false` since Phase 4. Sitecontainer resource still exists in `main.tf` for parity. **Never enable in Azure** — MinIO is local-dev-only. |
 | PostgreSQL Flexible Server | applied, serving | `psql-art-dev-art4242` (B_Standard_B1ms, PG 16, 32 GB, 7-day backup, **North Europe** — see PostgreSQL exception in CLAUDE.md). **Two roles in use** (Task C1): `art_admin` for Alembic + bootstrap, `art_app` (least-privilege CRUD only) for application runtime. |
@@ -27,8 +27,8 @@ Verify image tags after any apply:
 cd terraform/envs/dev
 source .env.terraform
 terraform output | grep -E "deployed_image|backend_image"
-# deployed_image = "hoso30/art-frontend:v32"
-# backend_image  = "hoso30/art-backend:v35"
+# deployed_image = "hoso30/art-frontend:v33"
+# backend_image  = "hoso30/art-backend:v36"
 ```
 
 Verify the live security stack:
@@ -152,6 +152,7 @@ Designed to recover databases stamped at a now-deleted revision (e.g. `005_produ
 | **Stock-based production: partial outcome (Խոտան)** | **done in working tree, migration `010`** | `backend/app/production/{models,schemas,service,router}.py`, `backend/app/products/{models,schemas}.py`, `BatchControl.tsx`, `frontend/src/app/dashboard/production/page.tsx`, `VariantActions.tsx`, `frontend/src/app/dashboard/products/[id]/page.tsx` |
 | **Damaged-stock report (Խոտանի հաշվետվություն)** | **done in working tree** | `backend/app/reports/{service,router}.py`, `frontend/src/app/dashboard/reports/ReportBuilder.tsx`, `backend/tests/test_reports_damaged_stock.py` |
 | **Sales report — per-customer + per-order export** | done, deployed v34 / v31 | `backend/app/reports/{service,router}.py`, `frontend/src/app/dashboard/reports/ReportBuilder.tsx`, `backend/tests/test_reports_sales.py`. `/reports/sales` accepts optional `customer_id` and (only when `customer_id` is set) optional `order_id`. Response carries `selected_customer` and `selected_order` blocks plus a per-line `order_items` list. CSV filename is `sales_report.csv` (unfiltered), `customer-report-<slug>-<YYYY-MM-DD>.csv` (customer-only), or `customer-report-<slug>-order-<id>-<YYYY-MM-DD>.csv` (customer + order). Error codes: `customer_not_found` (404), `order_id_requires_customer_id` (422), `order_not_found` (404), `order_not_for_customer` (422). No DB migration. Frontend: customer dropdown for orders/sales reports; order dropdown appears for sales after a customer is selected and a customer-scoped report has been generated (options derived from the response's `order_items`). |
+| **Bulk / series production batch creation (Շարք)** | done, deployed v36 / v33, no DB migration | Backend: new `POST /api/v1/production/batches/bulk` (`BUSINESS_MANAGER` gate) creates one `ProductionBatch` per item in a single atomic transaction. Pydantic `ProductionBatchBulkCreate` enforces `1 <= len(items) <= 50`, no duplicate `variant_id`, `quantity_to_produce >= 1`. Service `create_production_batches_bulk` in `backend/app/production/service.py` validates everything first (variant-belongs-to-product, size-keyed material requirements exist, aggregated material availability), then deducts materials **once per material** with the existing `stock_based_production` `StockMovement.reason` value (no ENUM change), then inserts batches. Single-create endpoint untouched. Audit: one `production.batch_created` row per created batch (same shape as single-create), emitted from the router after the service returns. New error codes: `variant_not_found_or_wrong_product` (422), `duplicate_variant` (422), `empty_items` (422 — defensive; Pydantic catches the API path), `too_many_items` (422 — defensive). Frontend: `frontend/src/app/dashboard/production/CreateBatchModal.tsx` adds a Single ↔ Շարք toggle. In Շարք mode the modal renders a per-variant table (checkbox / size / color / current stock / qty input), a common-quantity input + "Կիրառել ընտրվածներին" button, and a "Ընտրել ըստ գույնի" helper. Footer shows selected count and total quantity. Submit is disabled while no variants are selected, any selected qty < 1, or the request is in flight. Tests: `backend/tests/test_production_batches.py` (16 new cases — happy path, aggregate-shortage rollback, wrong-product variant, duplicate, empty/oversized items, qty=0, missing requirements, audit-row count, single-create regression, one-movement-per-material, RBAC matrix admin/director/PM/WM/simple_user). |
 | **RBAC — five user roles with backend authorization matrix** | done, deployed v35 / v32, migration `012_extend_user_roles` | Backend: extended `UserRole` enum (`backend/app/users/models.py`) with `director`, `production_manager`, `warehouse_manager` alongside existing `admin` / `simple_user`. Centralized role groups + `require_roles(*allowed)` dependency factory in `backend/app/dependencies.py`. Per-route guards rewritten across `customers`, `orders`, `products`, `production`, `inventory`, `reports`, `activity`, `users` routers. Service helpers `can_assign_role` / `can_manage_user` / `count_active_admins` / `is_last_active_admin` in `backend/app/users/service.py`. Pydantic `role: UserRole` rejects unknown values with 422. Self-role-change blocked (`self_role_change_denied`); self-deactivation blocked (`self_deactivation_denied`); last-active-admin demotion / deactivation blocked (`last_admin_required`); director can only assign `simple_user` (`role_assignment_denied`). Frontend: single source of truth in `frontend/src/lib/permissions.ts` (`MODULE_ACCESS`, `canAccessModule`, `canAssignRole`, `allowedRolesFor`, `ROLE_LABELS`); `requireModule(...)` / `requireRoles(...)` helpers in `frontend/src/lib/auth.ts`; sidebar / dashboard route guards filter modules per role. **Backend RBAC is authoritative** — frontend hiding is UX only; every API endpoint enforces authorization independently. Tests: `backend/tests/test_authorization_matrix.py` (51 passed, 2 skipped — last-admin guards covered directly by `test_is_last_active_admin_service_helper`). |
 
 ## RBAC matrix — load-bearing (deployed v35 / v32)
@@ -191,6 +192,63 @@ Five roles on `User.role`. **Backend is authoritative**: every API endpoint enfo
 - Plan summary: `0 to add, 3 to change, 0 to destroy` — only the three Web App / sidecontainer image references. No protected-resource changes.
 
 **Smoke-test canary**: User ID 7 (`art@art.am`, role `director`) was created intentionally as a smoke-test canary right after v35 came online. This is the only non-original-role row in the live DB. Treat as a known canary; do not delete without coordination. The canary's existence is what makes the rollback caveat (below) bite — see `ROLLBACK_NOTES.md`.
+
+## Bulk / series production batch creation — load-bearing (deployed v36 / v33)
+
+`POST /api/v1/production/batches/bulk` creates multiple `ProductionBatch` rows in a single atomic transaction. The single-create endpoint (`POST /api/v1/production/batches`) is unchanged and remains the primary path for one-off batches.
+
+**Request shape:**
+
+```json
+{
+  "product_id": 1,
+  "items": [
+    {"variant_id": 10, "quantity_to_produce": 10},
+    {"variant_id": 11, "quantity_to_produce": 10}
+  ]
+}
+```
+
+**Response shape:** `201 Created` with `{"items": [<ProductionBatchResponse>, ...]}` in the request order.
+
+**Atomic, all-or-nothing.** Validation runs before any DB write; the first write only happens after every check has passed. Any later failure raises `ValidationException` and `get_db`'s exception handler rolls back the whole transaction — including the `StockMovement` rows we just inserted. No partial state ever lands in the DB.
+
+**Validation order (`backend/app/production/service.py::create_production_batches_bulk`):**
+
+1. Pydantic-level: `1 <= len(items) <= 50`, `quantity_to_produce >= 1`, no duplicate `variant_id`. The validator on `ProductionBatchBulkCreate.items` raises a `ValueError` on duplicates which surfaces as 422 from FastAPI.
+2. Service defensive checks (in case the service is called directly): empty items, > 50 items, duplicate variant id, qty <= 0 → typed `ValidationException` with codes `empty_items` / `too_many_items` / `duplicate_variant` / `invalid_quantity`.
+3. `SELECT … FOR UPDATE` on `ProductVariant WHERE id IN (variant_ids) AND product_id = :product_id`. Compare returned id-set to requested set. Any missing → 422 `variant_not_found_or_wrong_product` listing the offending ids.
+4. `SELECT` on `ProductSizeMaterialRequirement WHERE product_id AND size IN (sizes)`. If any item's size has no requirement rows → 422 `no_material_requirements`.
+5. **Aggregate** material requirements across the entire request: `material_id → SUM(quantity_per_item * quantity_to_produce)` over all items.
+6. `SELECT … FOR UPDATE` on `Inventory WHERE material_id IN (…)`. Compute shortage list against the aggregated requirement (not per-item). Any shortage → 422 `insufficient_materials` with a per-material breakdown.
+7. **One `StockMovement` per material**, each carrying the *summed* deduction. Reason is the existing `stock_based_production` value — no `StockMovementReason` ENUM change, no migration.
+8. Insert one `ProductionBatch` per item with `materials_deducted=True`, `stock_added=False`, `current_stage="cutting"`, `stage_status="pending"`. Same defaults as single-create.
+9. Router emits one `production.batch_created` activity row per created batch — same shape as N single-creates so the activity feed treats them identically.
+
+**Frontend UX (`frontend/src/app/dashboard/production/CreateBatchModal.tsx`):**
+
+- Single ↔ Շարք tabs at the top of the modal. Single mode is the existing UX, byte-for-byte unchanged.
+- Շարք mode after a product is selected:
+  - Variants table with columns: checkbox, `Չափս`, `Գույն`, `Մնացորդ` (read-only `stock_quantity` from the variant), `Քանակ` input.
+  - Common-quantity controls above the table: `Ընդհանուր քանակ` input + `Կիրառել ընտրվածներին` button (writes the value into every checked row's qty input — admin can still override individual rows after).
+  - `Ընտրել ըստ գույնի` helper: pick a color from the dropdown + click `Ընտրել` to check every row matching that color.
+  - Footer: "Ընտրված է՝ N տարբերակ · ընդհանուր քանակ՝ M" + a "Չեղարկել ընտրությունը" link.
+  - `Ստեղծել` button is disabled while: no product selected, no variants selected, any selected qty < 1, more than 50 selected, or a request is in flight.
+  - On 2xx, toast `Ստեղծվեց N արտադրություն` and close the modal (prevents accidental double-submit).
+
+**Size ordering helper (`S → XL`) intentionally NOT shipped in v1.** Sizes are free-form `String(50)` on `ProductVariant.size`; we cannot assume a canonical order. The UI exposes only the safe helpers (manual select, "select all for color", common quantity). If demand emerges, add a `ProductVariant.sort_order` column or a hard-coded canonical-order constant in a follow-up.
+
+**Idempotency — known residual risk.**
+
+The bulk endpoint has no server-side idempotency key. A network-level retry after a successful POST would create a duplicate set of batches and double-deduct materials. Mitigations in place:
+
+- The frontend disables the submit button while the request is in flight and closes the modal on 2xx, so the only way to retry is to reopen the modal and re-confirm intent.
+- Pydantic caps `len(items) <= 50` to bound the blast radius if a bug doubles the array.
+- A retry against a fresh modal would still go through the full validation path, so a missing variant or shortage would 422 cleanly.
+
+The single-create endpoint has the same residual risk. Adding `Idempotency-Key` request-header support is documented as a possible future task in `NEXT_TASKS.md` but is **not** part of this task.
+
+**Authorization.** Same gate as single-create: `BUSINESS_MANAGER` (`admin` + `director` + `production_manager`). `warehouse_manager` and `simple_user` get 403. `director` is allowed because the canary user `art@art.am` (id 7) is a director and was the smoke-test actor when v35/v32 went live.
 
 ## Partial-outcome (Խոտան) semantics — load-bearing
 

@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from app.production.models import StageName, StageStatus
 
@@ -136,3 +136,30 @@ class ProductionBatchListResponse(BaseModel):
     total: int
     page: int
     limit: int
+
+
+# ── Bulk (series) production batch creation ──────────────
+
+
+class ProductionBatchBulkItem(BaseModel):
+    variant_id: int = Field(ge=1)
+    quantity_to_produce: int = Field(ge=1)
+
+
+class ProductionBatchBulkCreate(BaseModel):
+    product_id: int = Field(ge=1)
+    items: list[ProductionBatchBulkItem] = Field(min_length=1, max_length=50)
+
+    @field_validator("items")
+    @classmethod
+    def _no_duplicate_variants(cls, v: list[ProductionBatchBulkItem]) -> list[ProductionBatchBulkItem]:
+        seen: set[int] = set()
+        for item in v:
+            if item.variant_id in seen:
+                raise ValueError(f"duplicate variant_id {item.variant_id}")
+            seen.add(item.variant_id)
+        return v
+
+
+class ProductionBatchBulkResponse(BaseModel):
+    items: list[ProductionBatchResponse]

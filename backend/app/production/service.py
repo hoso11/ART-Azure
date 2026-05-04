@@ -499,6 +499,191 @@ async def create_production_batch(
     return batch
 
 
+async def create_production_batches_bulk(
+    db: AsyncSession,
+    *,
+    product_id: int,
+    items: list,  # list[schemas.ProductionBatchBulkItem]; runtime duck-typed to avoid circular import
+    created_by: int,
+) -> list[ProductionBatch]:
+    """Atomic bulk create. Validates everything, aggregates material requirements
+    across the whole request, deducts materials ONCE per material, then inserts
+    one ProductionBatch per item. A ValidationException at any step rolls the
+    whole transaction back via the get_db dependency.
+
+    Mirrors create_production_batch's invariants:
+      - quantity_to_produce > 0 (Pydantic-enforced; service rechecks defensively)
+      - every variant belongs to product_id
+      - no duplicate variant_id (Pydantic-enforced)
+      - 1..50 items (Pydantic-enforced)
+      - every variant.size has ProductSizeMaterialRequirement rows
+      - aggregated material requirement is satisfiable
+    """
+    from decimal import Decimal
+    from app.products.models import ProductVariant, ProductSizeMaterialRequirement
+    from app.inventory.models import Inventory, Material
+    from app.inventory.service import create_stock_movement
+
+    # Defensive — Pydantic already enforces these, but the service is callable
+    # directly from tests / scripts.
+    if not items:
+        raise ValidationException(
+            detail="Ընտրեք առնվազն մեկ տարբերակ",
+            code="empty_items",
+        )
+    if len(items) > 50:
+        raise ValidationException(
+            detail="Մեկ խմբով կարող է լինել առավելագույնը 50 տարբերակ",
+            code="too_many_items",
+        )
+
+    seen_variants: set[int] = set()
+    for item in items:
+        if item.variant_id in seen_variants:
+            raise ValidationException(
+                detail=f"Տարբերակ {item.variant_id} ընտրված է մեկից ավելի անգամ",
+                code="duplicate_variant",
+            )
+        seen_variants.add(item.variant_id)
+        if item.quantity_to_produce <= 0:
+            raise ValidationException(
+                detail="Քանակը պետք է լինի 1 կամ ավելի",
+                code="invalid_quantity",
+            )
+
+    requested_variant_ids = [item.variant_id for item in items]
+
+    # Lock all variants and verify they belong to this product.
+    variant_result = await db.execute(
+        select(ProductVariant)
+        .where(
+            ProductVariant.id.in_(requested_variant_ids),
+            ProductVariant.product_id == product_id,
+        )
+        .with_for_update()
+    )
+    variants_by_id: dict[int, ProductVariant] = {
+        v.id: v for v in variant_result.scalars().all()
+    }
+    missing_variant_ids = [vid for vid in requested_variant_ids if vid not in variants_by_id]
+    if missing_variant_ids:
+        raise ValidationException(
+            detail=(
+                "Հետևյալ տարբերակները չեն պատկանում ընտրված ապրանքին: "
+                + ", ".join(str(v) for v in missing_variant_ids)
+            ),
+            code="variant_not_found_or_wrong_product",
+        )
+
+    # Look up size-keyed material requirements covering every variant size.
+    requested_sizes = {variants_by_id[item.variant_id].size for item in items}
+    req_result = await db.execute(
+        select(ProductSizeMaterialRequirement).where(
+            ProductSizeMaterialRequirement.product_id == product_id,
+            ProductSizeMaterialRequirement.size.in_(list(requested_sizes)),
+        )
+    )
+    requirements_by_size: dict[str, list[ProductSizeMaterialRequirement]] = {}
+    for req in req_result.scalars().all():
+        requirements_by_size.setdefault(req.size, []).append(req)
+
+    sizes_without_reqs = [s for s in requested_sizes if s not in requirements_by_size]
+    if sizes_without_reqs:
+        raise ValidationException(
+            detail=(
+                "Հետևյալ չափսերի համար նյութեր սահմանված չեն: "
+                + ", ".join(sorted(sizes_without_reqs))
+            ),
+            code="no_material_requirements",
+        )
+
+    # Aggregate required quantities per material across the entire request.
+    aggregated_requirements: dict[int, Decimal] = {}
+    for item in items:
+        variant = variants_by_id[item.variant_id]
+        for req in requirements_by_size[variant.size]:
+            needed = req.quantity_per_item * Decimal(str(item.quantity_to_produce))
+            aggregated_requirements[req.material_id] = (
+                aggregated_requirements.get(req.material_id, Decimal("0")) + needed
+            )
+
+    # Lock inventory rows and validate aggregated availability.
+    inv_result = await db.execute(
+        select(Inventory)
+        .where(Inventory.material_id.in_(list(aggregated_requirements.keys())))
+        .with_for_update()
+    )
+    inventory_map: dict[int, Inventory] = {
+        inv.material_id: inv for inv in inv_result.scalars().all()
+    }
+
+    shortages: list[tuple[int, Decimal, Decimal]] = []
+    for material_id, required in aggregated_requirements.items():
+        inv = inventory_map.get(material_id)
+        available = inv.quantity_on_hand if inv else Decimal("0")
+        if available < required:
+            shortages.append((material_id, required, available))
+
+    if shortages:
+        mat_result = await db.execute(
+            select(Material).where(Material.id.in_([s[0] for s in shortages]))
+        )
+        mat_map = {m.id: m for m in mat_result.scalars().all()}
+        lines = []
+        for material_id, required, available in shortages:
+            mat = mat_map.get(material_id)
+            name = mat.name if mat else f"Material #{material_id}"
+            unit = mat.unit if mat else ""
+            lines.append(
+                f"• {name}: պետք է {required} {unit}, առկա է {available} {unit}, "
+                f"պակասում է {required - available} {unit}"
+            )
+        raise ValidationException(
+            detail="Անբավարար նյութեր ընդհանուր ցուցակի համար:\n" + "\n".join(lines),
+            code="insufficient_materials",
+        )
+
+    # All checks passed — deduct materials ONCE per material, then create batches.
+    # Reason="stock_based_production" matches the single-create path so the
+    # existing StockMovementReason Postgres enum stays unchanged (no migration).
+    for material_id, required in aggregated_requirements.items():
+        await create_stock_movement(
+            db,
+            material_id,
+            -required,
+            "stock_based_production",
+            created_by,
+        )
+
+    created_batches: list[ProductionBatch] = []
+    for item in items:
+        batch = ProductionBatch(
+            product_id=product_id,
+            variant_id=item.variant_id,
+            quantity_to_produce=item.quantity_to_produce,
+            production_type="stock_based",
+            current_stage="cutting",
+            stage_status="pending",
+            materials_deducted=True,
+            stock_added=False,
+            created_by=created_by,
+        )
+        db.add(batch)
+        created_batches.append(batch)
+
+    await db.flush()
+    for batch in created_batches:
+        await db.refresh(batch)
+
+    logger.info(
+        "production.batch_bulk_created",
+        product_id=product_id,
+        batch_ids=[b.id for b in created_batches],
+        item_count=len(created_batches),
+    )
+    return created_batches
+
+
 async def list_production_batches(
     db: AsyncSession,
     page: int = 1,
