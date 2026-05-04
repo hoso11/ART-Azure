@@ -173,6 +173,8 @@ The locks and role assignments already in Azure remain protective regardless of 
     ```
     Empty output required. If anything matches, do not push and do not bump the Terraform tag.
 23. **Image tags `v13` (backend), `v21`/`v22`/`v23` (frontend) are blacklisted in `terraform/envs/dev/variables.tf` validation.** Do not remove them from the blacklist. If a future tag is found to be poisoned, add it to the blacklist immediately rather than relying on humans to remember.
+24. **PostgreSQL dumps go to gitignored `backups/` only, and production dumps require explicit per-run user approval.** Use `scripts/db/dump-postgres.sh` (Docker `postgres:16`, custom format). Dump files must never be committed (`.gitignore` already covers `backups/`, `*.dump`, `*.sql`), pasted into chats, or uploaded to external services — they contain full database PII. The script refuses `ART_DUMP_ENV=prod` unless `ART_DUMP_ALLOW_PROD=1` is set; even then, a separate explicit user approval is required per run before the flag is used. See `scripts/db/README.md`.
+25. **Postgres firewall opens for a dump are temporary.** When a laptop dump needs to reach Azure, set `var.dump_client_ip` in gitignored `terraform.tfvars`, plan + apply (creates `DumpClient` firewall rule), run the dump, then **clear the variable and apply again to remove the rule**. Never commit a real IP. The variable's validation rejects CIDR ranges (single IPv4 only). Leaving `DumpClient` in place after a dump is a process violation — review at every commit and at end of session. Do not bypass via `az` CLI under any circumstances.
 
 ## When in doubt
 

@@ -58,6 +58,7 @@ free-tier expires" below.
 | `psql-art-dev-<suffix>` | `azurerm_postgresql_flexible_server` | **B1MS**, PG 16, 32 GB storage, 7-day backup, no HA, no geo-redundant. **Region: `var.postgres_location` (default North Europe)** — see "PostgreSQL region exception" below. |
 | `art_manufacturing` | `azurerm_postgresql_flexible_server_database` | Application DB on the Flexible Server. UTF8 / en_US.utf8. |
 | `AllowAzureServices` | `azurerm_postgresql_flexible_server_firewall_rule` | Magic `0.0.0.0–0.0.0.0` rule = "allow all Azure services". Only opens the Azure backbone, not the public internet. Credentials still required. |
+| `DumpClient` | `azurerm_postgresql_flexible_server_firewall_rule` | **Optional, count-gated.** Created only when `var.dump_client_ip` is set (default null = no rule). Single IPv4 address that can reach 5432 for ad-hoc local `pg_dump`. Set in gitignored `terraform.tfvars` only when running `scripts/db/dump-postgres.sh`; remove and re-apply afterward. See `scripts/db/README.md` (Firewall). |
 | (in-state) `random_password.postgres_admin` | `random_password` | 24-char URL-safe password. Postgres server admin (`art_admin`). Stored in Terraform state — read via `terraform output`. Used by Alembic migrations and bootstrap. |
 | (in-state) `random_password.art_app_db` | `random_password` | 24-char URL-safe password for the runtime `art_app` role (Task C1). Read by `scripts/bootstrap_db_user.py` to set/rotate the role's password on cold start. |
 

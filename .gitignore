@@ -62,3 +62,9 @@ backend/celerybeat-schedule
 backend/celerybeat-schedule.bak
 backend/test.db
 frontend/tsconfig.tsbuildinfo
+
+# Local database dumps — never commit. Output of scripts/db/dump-postgres.sh
+# contains every byte of the source database (full PII).
+backups/
+*.dump
+*.sql

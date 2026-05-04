@@ -362,6 +362,23 @@ Each feature below is part of the live deployment as of v33 (frontend) / v36 (ba
 - **Storage Account contents:** Portal → `startdevimgsart4242` → Containers → `art-images`. Or `az storage blob list -c art-images --account-name startdevimgsart4242` (this is one of the few `az` commands acceptable for read-only diagnostics; Terraform auth still uses the SP).
 - **Image-tag drift:** `terraform output | grep image`. If the deployed value doesn't match what's in `terraform.tfvars`, somebody applied without committing — investigate before re-applying.
 
+## Database backup
+
+Local helpers for taking a `pg_dump` of the dev Azure PostgreSQL database
+to a local file (and restoring it into the local docker-compose Postgres
+for verification) live under `scripts/db/`:
+
+- `scripts/db/dump-postgres.sh` — Docker `postgres:16`-based dump,
+  custom format (`-Fc`), output to `backups/postgres/` (gitignored).
+- `scripts/db/restore-postgres-local.sh` — restores to the local compose
+  Postgres only; refuses any remote target.
+
+Connection values come from `terraform output` (no secrets in repo); see
+`scripts/db/README.md` for the full safety / firewall / production-gate
+notes. A laptop dump currently requires a temporary Postgres firewall
+rule for your public IP (Terraform option preferred, not yet
+implemented).
+
 ## Related docs
 
 - `terraform/envs/dev/README.md` — variable reference, free-tier rules, expected plans, destroy procedure.

@@ -506,6 +506,20 @@ resource "azurerm_postgresql_flexible_server_firewall_rule" "allow_azure_service
   end_ip_address   = "0.0.0.0"
 }
 
+# Temporary single-IP firewall rule for ad-hoc local pg_dump from an
+# operator workstation. Created only when var.dump_client_ip is set.
+#
+# Add: set var.dump_client_ip in gitignored terraform.tfvars, plan + apply.
+# Remove: clear the value (or set null), plan + apply.
+# See variable docstring in variables.tf and scripts/db/README.md.
+resource "azurerm_postgresql_flexible_server_firewall_rule" "dump_client" {
+  count            = var.dump_client_ip == null ? 0 : 1
+  name             = "DumpClient"
+  server_id        = azurerm_postgresql_flexible_server.this.id
+  start_ip_address = var.dump_client_ip
+  end_ip_address   = var.dump_client_ip
+}
+
 # --- Phase 4: Azure Blob Storage for product images -------------------------
 #
 # Replaces the MinIO sidecar. Backend image v20+ uses

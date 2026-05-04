@@ -154,3 +154,13 @@ azure_storage_container = "art-images"
 # allowance for dev workloads. Set back to "West Europe" once the West
 # Europe restriction is lifted (quota approved or subscription upgraded).
 # postgres_location              = "North Europe"
+
+# --- Temporary firewall rule for local pg_dump (optional) ------------------
+# Set this to your current public IP only when you intend to run
+# scripts/db/dump-postgres.sh from this machine. Default is null (no rule
+# created — the only firewall rule in the env is AllowAzureServices, which
+# does not cover home/office IPs). Plan/apply adds DumpClient; clear the
+# value (or set null) and plan/apply again to remove it.
+# Find your public IP: `curl -s https://api.ipify.org`
+# NEVER COMMIT this file — terraform.tfvars is gitignored.
+# dump_client_ip                 = "203.0.113.42"

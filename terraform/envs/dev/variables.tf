@@ -377,3 +377,30 @@ variable "postgres_location" {
   default     = "North Europe"
   description = "Azure region for the PostgreSQL Flexible Server only. All other resources use var.location. Default North Europe is the closest free-tier region to West Europe (~10 ms RTT). Free-tier B1MS offer is available in this region."
 }
+
+# Temporary public-IP firewall rule for ad-hoc local pg_dump.
+#
+# Default null = no rule (the only Postgres firewall rule in this environment
+# is `AllowAzureServices`, which covers Azure-internal traffic only).
+#
+# Workflow:
+#   1. Set `dump_client_ip = "<your.public.ip>"` in gitignored
+#      `terraform/envs/dev/terraform.tfvars`.
+#   2. `terraform plan -out=tfplan` → expect `1 to add` (the firewall rule).
+#   3. `terraform apply tfplan` (per SAFE_TASK_RULES #19, requires explicit
+#      user approval).
+#   4. Run `scripts/db/dump-postgres.sh`.
+#   5. Remove the line (or set back to null) and apply again to drop the
+#      rule. Leaving the rule in place exposes 5432 to that single IP
+#      indefinitely — always remove after dumping.
+#
+# Never commit a real value: terraform.tfvars is gitignored.
+variable "dump_client_ip" {
+  type        = string
+  default     = null
+  description = "Single IPv4 address allowed to reach Postgres on 5432 for ad-hoc local pg_dump. null = no rule (default). Set in gitignored terraform.tfvars only when dumping; remove and re-apply afterward."
+  validation {
+    condition     = var.dump_client_ip == null || can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", var.dump_client_ip))
+    error_message = "dump_client_ip must be null or a single IPv4 address (e.g. 203.0.113.42). CIDR ranges are not allowed — only one IP."
+  }
+}
