@@ -239,23 +239,60 @@ async def update_order(db: AsyncSession, order_id: int, admin_user_id: int | Non
     return order
 
 
-async def delete_order(db: AsyncSession, order_id: int) -> None:
-    from app.production.models import ProductionStage
+async def delete_order(db: AsyncSession, order_id: int) -> int:
+    """Hard-delete an order. Returns the number of pending ProductionStage
+    rows removed alongside it (0 if none).
+
+    Guards (in evaluation order):
+      1. order.stock_deducted == True
+            -> 422 order_stock_already_deducted
+      2. Any ProductionStage row for this order has status != pending
+            -> 422 order_has_active_production
+
+    When both guards pass, pending ProductionStage rows (if any) are deleted
+    per-row so the ORM cascade clears production_logs on SQLite + Postgres.
+    OrderItem rows cascade via Order.items' cascade="all, delete-orphan".
+
+    ProductionBatch is intentionally NOT checked: it has no order_id (it is
+    stock-replenishment, not order-fulfillment). Checking via shared variant
+    ids would block unrelated orders and is a false-positive trap.
+    """
+    from app.production.models import ProductionStage, StageStatus
 
     order = await get_order_by_id(db, order_id)
 
-    stage_count = await db.execute(
-        select(func.count()).select_from(ProductionStage).where(ProductionStage.order_id == order_id)
-    )
-    if stage_count.scalar() > 0:
+    if order.stock_deducted:
         raise ValidationException(
-            detail="Cannot delete an order that has production stages. Cancel it instead.",
-            code="order_has_production_stages",
+            detail="Cannot delete an order after stock has been deducted. Cancel it instead.",
+            code="order_stock_already_deducted",
         )
 
-    logger.info("order.deleted", order_id=order_id, status=order.status.value)
+    stage_result = await db.execute(
+        select(ProductionStage)
+        .where(ProductionStage.order_id == order_id)
+        .with_for_update()
+    )
+    stages = list(stage_result.scalars().all())
+    if any(s.status != StageStatus.pending for s in stages):
+        raise ValidationException(
+            detail="Cannot delete an order after production has started. Cancel it instead.",
+            code="order_has_active_production",
+        )
+
+    removed = 0
+    for stage in stages:
+        await db.delete(stage)
+        removed += 1
+
+    logger.info(
+        "order.deleted",
+        order_id=order_id,
+        status=order.status.value,
+        stages_removed=removed,
+    )
     await db.delete(order)
     await db.flush()
+    return removed
 
 
 async def add_order_item(db: AsyncSession, order_id: int, **kwargs) -> OrderItem:

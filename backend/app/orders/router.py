@@ -199,11 +199,12 @@ async def delete_order(
 ):
     existing = await service.get_order_by_id(db, order_id)
     snapshot = _order_snapshot(existing)
-    await service.delete_order(db, order_id)
+    removed = await service.delete_order(db, order_id)
     await activity_service.log_activity(
         db, user=admin, request=request,
         action="order.deleted", entity_type="order", entity_id=order_id,
         old_values=snapshot,
+        details=(f"Auto-removed {removed} pending production stage(s)" if removed else None),
     )
 
 
