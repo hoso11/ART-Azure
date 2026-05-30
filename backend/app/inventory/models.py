@@ -44,6 +44,15 @@ class StockMovement(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     material_id: Mapped[int] = mapped_column(Integer, ForeignKey("materials.id"), nullable=False)
     order_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("orders.id"), nullable=True)
+    # FK to ProductionBatch added in migration 013_stock_movement_batch_id.
+    # Populated by stock-based production paths so the admin-only batch
+    # rollback can identify exactly which movements were written by a batch.
+    # NULL on legacy rows and on movements not tied to a batch (e.g. purchases,
+    # adjustments). ondelete=SET NULL so the ledger row survives batch delete.
+    batch_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("production_batches.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     quantity_change: Mapped[Decimal] = mapped_column(Numeric(10, 3), nullable=False)
     reason: Mapped[StockMovementReason] = mapped_column(Enum(StockMovementReason), nullable=False)
     created_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)

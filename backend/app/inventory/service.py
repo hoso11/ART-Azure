@@ -100,6 +100,7 @@ async def create_stock_movement(
     reason: str,
     created_by: int,
     order_id: int | None = None,
+    batch_id: int | None = None,
 ) -> StockMovement:
     material = await get_material_by_id(db, material_id)
 
@@ -127,6 +128,7 @@ async def create_stock_movement(
         reason=reason,
         created_by=created_by,
         order_id=order_id,
+        batch_id=batch_id,
     )
     db.add(movement)
     await db.flush()

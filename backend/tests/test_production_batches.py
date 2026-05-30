@@ -910,11 +910,12 @@ async def test_bulk_happy_path_creates_all_batches_and_aggregates_deduction(
 
 
 @pytest.mark.asyncio
-async def test_bulk_one_movement_per_material_not_per_batch(
+async def test_bulk_one_movement_per_batch_per_material(
     client: AsyncClient, admin_user, customer, admin_cookies
 ):
-    """Aggregated material deduction must produce ONE StockMovement per
-    material, not one per batch. Verifies via /materials/{id}/movements."""
+    """Since migration 013, bulk-create writes ONE StockMovement per
+    (batch, material) pair so each batch is independently rollback-able
+    via the admin delete-batch endpoint. Total deduction is unchanged."""
     product_id, vmap = await _make_multi_variant_product(
         client, admin_cookies, sku="BULK-MV-001",
         variants=[("S", "Red"), ("M", "Red"), ("L", "Red")],
@@ -935,13 +936,13 @@ async def test_bulk_one_movement_per_material_not_per_batch(
     resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
     assert resp.status_code == 201, resp.text
 
-    # Aggregated deduction: 3 * 5 * 1 = 15; 200 - 15 = 185.
+    # Total deduction is unchanged: 3 * 5 * 1 = 15; 200 - 15 = 185.
     assert await _material_qty(client, admin_cookies, mat_id) == Decimal("185")
 
     if movements_before >= 0:
         movements_after = await _stock_movement_count(client, admin_cookies, mat_id)
-        assert movements_after - movements_before == 1, (
-            f"expected exactly 1 new StockMovement for the bulk request, "
+        assert movements_after - movements_before == 3, (
+            f"expected one StockMovement per batch (3) for the bulk request, "
             f"got {movements_after - movements_before}"
         )
 
@@ -1244,3 +1245,324 @@ async def test_bulk_authorization_matrix(
     assert resp.status_code == expected, (
         f"role={role_name} expected {expected}, got {resp.status_code}: {resp.text}"
     )
+
+
+# ── DELETE /production/batches/{id} — admin batch rollback ──────────────────
+
+
+async def _complete_batch_assert_ok(client, admin_cookies, batch_id, *, good, damaged, reason=None):
+    """Test-local helper around the existing _complete_batch fixture that
+    asserts a 200 and returns the parsed body. Avoids shadowing the older
+    _complete_batch helper that returns the raw response."""
+    resp = await _complete_batch(
+        client, admin_cookies, batch_id, good=good, damaged=damaged, reason=reason,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+@pytest.mark.asyncio
+async def test_delete_completed_single_batch_rolls_back_inventory_and_stocks(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session,
+):
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="DELBATCH-001", size="M", color="Black"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-DELB-001", qty=100)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=2,
+    )
+
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=10
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    batch_id = create_resp.json()["id"]
+    # 10 units * 2 m = 20 m → 100 - 20 = 80 m on hand
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("80")
+
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=7, damaged=3, reason="defect")
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == 7
+    assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == 3
+
+    movements_before_delete = await _stock_movement_count(client, admin_cookies, mat_id)
+
+    resp = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=admin_cookies)
+    assert resp.status_code == 204, resp.text
+
+    # Material restored to original 100 (reversal appended, not subtracted).
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("100")
+    # Variant counters rolled back.
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == 0
+    assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == 0
+    # Reversal row was APPENDED to the ledger (not removed). The
+    # /movements endpoint is not exposed in every environment; guard with
+    # the same -1 sentinel the bulk tests use.
+    if movements_before_delete >= 0:
+        movements_after = await _stock_movement_count(client, admin_cookies, mat_id)
+        assert movements_after - movements_before_delete == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_one_bulk_created_batch_only_rolls_back_that_batch(
+    client: AsyncClient, admin_user, customer, admin_cookies,
+):
+    product_id, vmap = await _make_multi_variant_product(
+        client, admin_cookies, sku="DELBULK-001",
+        variants=[("S", "Red"), ("M", "Red"), ("L", "Red")],
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-DELBULK-001", qty=300)
+    for s in ("S", "M", "L"):
+        await _add_size_requirement(
+            client, admin_cookies, product_id=product_id, material_id=mat_id,
+            size=s, qty_per_item=1,
+        )
+
+    items = [
+        {"variant_id": vmap[("S", "Red")], "quantity_to_produce": 5},
+        {"variant_id": vmap[("M", "Red")], "quantity_to_produce": 5},
+        {"variant_id": vmap[("L", "Red")], "quantity_to_produce": 5},
+    ]
+    bulk_resp = await _bulk_create(client, admin_cookies, product_id=product_id, items=items)
+    assert bulk_resp.status_code == 201
+    bulk_items = bulk_resp.json()["items"]
+    # Material: 300 - (5+5+5) = 285
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("285")
+
+    middle_batch = bulk_items[1]
+    middle_variant_id = middle_batch["variant_id"]
+    middle_batch_id = middle_batch["id"]
+    await _complete_batch(
+        client, admin_cookies, batch_id=middle_batch_id, good=5, damaged=0,
+    )
+
+    resp = await client.delete(
+        f"/api/v1/production/batches/{middle_batch_id}", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204, resp.text
+
+    # Only the middle batch's 5 m was reversed: 285 + 5 = 290.
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("290")
+    # The other two batches' deductions are intact, their variants untouched.
+    assert await _variant_stock(client, admin_cookies, product_id, middle_variant_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_in_progress_batch_rejected(
+    client: AsyncClient, admin_user, customer, admin_cookies,
+):
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="DELINPROG-001", size="M", color="Blue"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-DELINPROG-001", qty=50)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=10
+    )
+    batch_id = create_resp.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=5, damaged=0)  # partial
+
+    resp = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=admin_cookies)
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "batch_not_completed"
+    # Nothing rolled back.
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("40")
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == 5
+
+
+@pytest.mark.asyncio
+async def test_delete_pending_batch_rejected(
+    client: AsyncClient, admin_user, customer, admin_cookies,
+):
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="DELPEND-001", size="M", color="Green"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-DELPEND-001", qty=50)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=10
+    )
+    batch_id = create_resp.json()["id"]
+
+    resp = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=admin_cookies)
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "batch_not_completed"
+
+
+@pytest.mark.asyncio
+async def test_delete_rejected_when_sellable_stock_underflow(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session,
+):
+    from app.products.models import ProductVariant
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="DELUF-S-001", size="M", color="Pink"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-DELUF-S-001", qty=100)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=10
+    )
+    batch_id = create_resp.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=10, damaged=0)
+    # Simulate downstream consumption: drain sellable below batch.good_quantity.
+    from sqlalchemy import select as _select_inner
+    v = (await db_session.execute(
+        _select_inner(ProductVariant).where(ProductVariant.id == variant_id)
+    )).scalar_one()
+    v.stock_quantity = 3
+    await db_session.commit()
+
+    resp = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=admin_cookies)
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "batch_rollback_would_underflow"
+    # Material untouched by the failed attempt.
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("90")
+
+
+@pytest.mark.asyncio
+async def test_delete_rejected_when_damaged_stock_underflow(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session,
+):
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="DELUF-D-001", size="M", color="Cyan"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-DELUF-D-001", qty=100)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=10
+    )
+    batch_id = create_resp.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=0, damaged=10, reason="bad")
+    # Drain damaged_stock_quantity below batch.damaged_quantity.
+    from sqlalchemy import select as _select_inner
+    from app.products.models import ProductVariant as _PV
+    v = (await db_session.execute(_select_inner(_PV).where(_PV.id == variant_id))).scalar_one()
+    v.damaged_stock_quantity = 2
+    await db_session.commit()
+
+    resp = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=admin_cookies)
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "batch_rollback_would_underflow"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "role_name",
+    ["director", "production_manager", "warehouse_manager", "simple_user"],
+)
+async def test_delete_non_admin_forbidden(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session, role_name,
+):
+    from app.users.models import UserRole as _UR
+
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku=f"DELRBAC-{role_name[:6]}", size="M", color="Brown"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku=f"MAT-DELRBAC-{role_name[:6]}", qty=50)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=5
+    )
+    batch_id = create_resp.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=5, damaged=0)
+
+    actor = await _make_user_with_role(db_session, _UR(role_name))
+    actor_cookies = _cookies_for_user(actor)
+
+    resp = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=actor_cookies)
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "insufficient_permissions"
+
+
+@pytest.mark.asyncio
+async def test_delete_audit_row_only_on_success(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session,
+):
+    from app.activity.models import ActivityLog
+    from sqlalchemy import func as _func, select as _sel
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="DELAUD-001", size="M", color="Olive"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-DELAUD-001", qty=50)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=5
+    )
+    batch_id = create_resp.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=3, damaged=2)
+
+    count_before = (await db_session.execute(
+        _sel(_func.count()).select_from(ActivityLog).where(ActivityLog.action == "production.batch_deleted")
+    )).scalar()
+    resp = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=admin_cookies)
+    assert resp.status_code == 204
+    count_after_success = (await db_session.execute(
+        _sel(_func.count()).select_from(ActivityLog).where(ActivityLog.action == "production.batch_deleted")
+    )).scalar()
+    assert count_after_success - count_before == 1
+
+    # Now create a second batch, complete it, drain sellable to force a 422,
+    # then verify no new audit row was written.
+    create2 = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=5
+    )
+    batch_id_2 = create2.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id_2, good=5, damaged=0)
+
+    from sqlalchemy import select as _select_inner
+    from app.products.models import ProductVariant as _PV
+    v = (await db_session.execute(_select_inner(_PV).where(_PV.id == variant_id))).scalar_one()
+    v.stock_quantity = 0
+    await db_session.commit()
+
+    blocked = await client.delete(f"/api/v1/production/batches/{batch_id_2}", cookies=admin_cookies)
+    assert blocked.status_code == 422
+
+    count_after_block = (await db_session.execute(
+        _sel(_func.count()).select_from(ActivityLog).where(ActivityLog.action == "production.batch_deleted")
+    )).scalar()
+    assert count_after_block == count_after_success  # no new row
+
+
+@pytest.mark.asyncio
+async def test_delete_idempotent_second_call_404(
+    client: AsyncClient, admin_user, customer, admin_cookies,
+):
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="DELIDEM-001", size="M", color="Teal"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-DELIDEM-001", qty=50)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=5
+    )
+    batch_id = create_resp.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=5, damaged=0)
+
+    first = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=admin_cookies)
+    assert first.status_code == 204
+    second = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=admin_cookies)
+    assert second.status_code == 404
+    assert second.json()["code"] == "not_found"

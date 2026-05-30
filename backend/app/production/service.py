@@ -465,16 +465,10 @@ async def create_production_batch(
             code="insufficient_materials",
         )
 
-    # All checks passed — deduct materials.
-    for material_id, required in material_requirements.items():
-        await create_stock_movement(
-            db,
-            material_id,
-            -required,
-            "stock_based_production",
-            created_by,
-        )
-
+    # All checks passed. Create the batch first so we have batch.id to put
+    # on each StockMovement (lets the admin-only delete-batch flow identify
+    # exactly which ledger rows to reverse). Same transaction — if any later
+    # step raises, get_db rolls everything back.
     batch = ProductionBatch(
         product_id=product_id,
         variant_id=variant_id,
@@ -489,6 +483,17 @@ async def create_production_batch(
     db.add(batch)
     await db.flush()
     await db.refresh(batch)
+
+    for material_id, required in material_requirements.items():
+        await create_stock_movement(
+            db,
+            material_id,
+            -required,
+            "stock_based_production",
+            created_by,
+            batch_id=batch.id,
+        )
+
     logger.info(
         "production.batch_created",
         batch_id=batch.id,
@@ -643,18 +648,16 @@ async def create_production_batches_bulk(
             code="insufficient_materials",
         )
 
-    # All checks passed — deduct materials ONCE per material, then create batches.
-    # Reason="stock_based_production" matches the single-create path so the
-    # existing StockMovementReason Postgres enum stays unchanged (no migration).
-    for material_id, required in aggregated_requirements.items():
-        await create_stock_movement(
-            db,
-            material_id,
-            -required,
-            "stock_based_production",
-            created_by,
-        )
-
+    # All checks passed. Create batches first so each one has an id before
+    # we write its material deductions. We then write one StockMovement per
+    # (batch, material) pair — total deduction is identical to the previous
+    # aggregated form, but each row is now tied to its source batch via
+    # StockMovement.batch_id. This is what lets the admin-only delete-batch
+    # flow roll back exactly one batch out of a bulk request.
+    #
+    # Validation-before-deduction order is preserved (see KNOWN_RISKS.md
+    # #15): every shortage check above ran on the aggregated totals before
+    # any row is written.
     created_batches: list[ProductionBatch] = []
     for item in items:
         batch = ProductionBatch(
@@ -674,6 +677,21 @@ async def create_production_batches_bulk(
     await db.flush()
     for batch in created_batches:
         await db.refresh(batch)
+
+    # Per-batch material deductions. Reason stays "stock_based_production"
+    # so the existing StockMovementReason Postgres enum is unchanged.
+    for item, batch in zip(items, created_batches):
+        variant = variants_by_id[item.variant_id]
+        for req in requirements_by_size[variant.size]:
+            needed = req.quantity_per_item * Decimal(str(item.quantity_to_produce))
+            await create_stock_movement(
+                db,
+                req.material_id,
+                -needed,
+                "stock_based_production",
+                created_by,
+                batch_id=batch.id,
+            )
 
     logger.info(
         "production.batch_bulk_created",
@@ -891,3 +909,145 @@ async def complete_production_batch(
         new_variant_damaged_stock=variant.damaged_stock_quantity,
     )
     return batch, True, is_now_complete, good_quantity, damaged_quantity
+
+
+async def delete_production_batch(
+    db: AsyncSession,
+    batch_id: int,
+    *,
+    admin_id: int,
+) -> dict:
+    """Admin-only rollback + hard delete of a completed ProductionBatch.
+
+    Only batches that have actually finished (stage_status == "completed"
+    AND stock_added == True) are eligible. The rollback is atomic — every
+    failure raises and the surrounding get_db rolls back.
+
+    Side effects on success:
+      * For each StockMovement linked to this batch via batch_id, append a
+        reversing StockMovement with reason="adjustment" and the negated
+        quantity_change. Inventory.quantity_on_hand is updated in lockstep
+        (via the existing create_stock_movement helper, so its insufficient-
+        stock guard still applies if a future code path goes negative).
+      * variant.stock_quantity -= batch.good_quantity (sellable rollback).
+      * variant.damaged_stock_quantity -= batch.damaged_quantity (Khotan
+        rollback).
+      * The batch row is hard-deleted. FK on stock_movements.batch_id is
+        ondelete=SET NULL, so both the originals and the reversals survive
+        as ledger rows.
+
+    Returns: {"materials_reversed": N, "good_reversed": M, "damaged_reversed": K}
+    used by the router for the activity log details string.
+
+    Raises ValidationException with codes:
+        batch_not_completed             — batch is pending/in_progress.
+        batch_rollback_would_underflow  — variant counters would go negative.
+        batch_legacy_no_movement_link   — pre-v38 batch with no batch_id
+                                          linkage on its stock_movements; the
+                                          rollback cannot be computed safely.
+    """
+    from app.products.models import ProductVariant
+    from app.inventory.models import StockMovement, Inventory
+    from app.inventory.service import create_stock_movement
+
+    batch_result = await db.execute(
+        select(ProductionBatch).where(ProductionBatch.id == batch_id).with_for_update()
+    )
+    batch = batch_result.scalar_one_or_none()
+    if batch is None:
+        raise NotFoundException(detail=f"Production batch {batch_id} not found")
+
+    if batch.stage_status != "completed" or not batch.stock_added:
+        raise ValidationException(
+            detail="Ջնջվում են միայն ավարտված արտադրությունները",
+            code="batch_not_completed",
+        )
+
+    variant_result = await db.execute(
+        select(ProductVariant).where(ProductVariant.id == batch.variant_id).with_for_update()
+    )
+    variant = variant_result.scalar_one_or_none()
+    if variant is None:
+        # Variant FK from ProductionBatch has no ondelete rule, so this is
+        # unreachable in normal operation. Defensive only.
+        raise NotFoundException(
+            detail=f"Variant {batch.variant_id} not found — cannot roll back batch"
+        )
+
+    if variant.stock_quantity < batch.good_quantity:
+        raise ValidationException(
+            detail=(
+                f"Հնարավոր չէ ետ վերցնել {batch.good_quantity} վաճառվող միավոր: "
+                f"ընթացիկ պաշարն է {variant.stock_quantity}. "
+                "Մի մասը արդեն վաճառվել է:"
+            ),
+            code="batch_rollback_would_underflow",
+        )
+    if variant.damaged_stock_quantity < batch.damaged_quantity:
+        raise ValidationException(
+            detail=(
+                f"Հնարավոր չէ ետ վերցնել {batch.damaged_quantity} խոտան միավոր: "
+                f"ընթացիկ խոտանն է {variant.damaged_stock_quantity}."
+            ),
+            code="batch_rollback_would_underflow",
+        )
+
+    # Load the original material-deduction rows. If batch.materials_deducted
+    # was set but nothing is linked, this is a legacy batch (predates the
+    # 013_stock_movement_batch_id migration). Refuse rather than guess.
+    original_result = await db.execute(
+        select(StockMovement).where(StockMovement.batch_id == batch.id)
+    )
+    originals = list(original_result.scalars().all())
+    if batch.materials_deducted and not originals:
+        raise ValidationException(
+            detail=(
+                "Այս արտադրությունը ստեղծվել է մինչ v38: ետ հաշվարկը հնարավոր չէ "
+                "ինքնաշխատ կատարել: խորհրդակցեք պահեստապետի հետ:"
+            ),
+            code="batch_legacy_no_movement_link",
+        )
+
+    # Lock the inventory rows we are about to update. Ordered by material_id
+    # so concurrent rollbacks of different batches cannot deadlock.
+    material_ids = sorted({m.material_id for m in originals})
+    if material_ids:
+        await db.execute(
+            select(Inventory).where(Inventory.material_id.in_(material_ids)).with_for_update()
+        )
+
+    # Append the reversing movements. Use reason="adjustment" (existing enum
+    # value) so no Postgres enum migration is needed.
+    for original in originals:
+        await create_stock_movement(
+            db,
+            original.material_id,
+            -original.quantity_change,  # negate the original deduction
+            "adjustment",
+            admin_id,
+            batch_id=batch.id,
+        )
+
+    # Roll back variant counters.
+    variant.stock_quantity -= batch.good_quantity
+    variant.damaged_stock_quantity -= batch.damaged_quantity
+
+    summary = {
+        "materials_reversed": len(originals),
+        "good_reversed": batch.good_quantity,
+        "damaged_reversed": batch.damaged_quantity,
+    }
+
+    await db.delete(batch)
+    await db.flush()
+
+    logger.info(
+        "production.batch_deleted",
+        batch_id=batch_id,
+        variant_id=variant.id,
+        materials_reversed=summary["materials_reversed"],
+        good_reversed=summary["good_reversed"],
+        damaged_reversed=summary["damaged_reversed"],
+        admin_id=admin_id,
+    )
+    return summary

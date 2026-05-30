@@ -8,6 +8,7 @@ import Link from "next/link";
 import { OrderCurrentControl } from "./OrderCurrentControl";
 import { CreateBatchButton } from "./CreateBatchButton";
 import { BatchControl } from "./BatchControl";
+import { DeleteBatchButton } from "./DeleteBatchButton";
 
 const STAGE_LABELS: Record<string, string> = {
   cutting: "Կտրում",
@@ -24,7 +25,8 @@ export default async function ProductionPage({
 }: {
   searchParams: Promise<{ page?: string; status?: string; filter?: string }>;
 }) {
-  await requireModule("production");
+  const session = await requireModule("production");
+  const isAdmin = session.role === "admin";
   const params = await searchParams;
   const page = parseInt(params.page || "1");
   const filter = params.filter === "in_progress" ? "in_progress" : "";
@@ -182,15 +184,24 @@ export default async function ProductionPage({
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-600">{formatDate(b.created_at)}</td>
                   <td className="px-6 py-4 text-right">
-                    <BatchControl
-                      batchId={b.id}
-                      currentStage={b.current_stage}
-                      currentStatus={b.stage_status}
-                      stockAdded={b.stock_added}
-                      quantityToProduce={b.quantity_to_produce}
-                      goodSoFar={b.good_quantity}
-                      damagedSoFar={b.damaged_quantity}
-                    />
+                    <div className="flex items-center justify-end gap-3 whitespace-nowrap">
+                      <BatchControl
+                        batchId={b.id}
+                        currentStage={b.current_stage}
+                        currentStatus={b.stage_status}
+                        stockAdded={b.stock_added}
+                        quantityToProduce={b.quantity_to_produce}
+                        goodSoFar={b.good_quantity}
+                        damagedSoFar={b.damaged_quantity}
+                      />
+                      {isAdmin && b.stage_status === "completed" && b.stock_added && (
+                        <DeleteBatchButton
+                          batchId={b.id}
+                          good={b.good_quantity}
+                          damaged={b.damaged_quantity}
+                        />
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

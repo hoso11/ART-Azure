@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import require_roles, BUSINESS_MANAGER
 from app.production import service, schemas
-from app.users.models import User
+from app.users.models import User, UserRole
 from app.activity import service as activity_service
 
 router = APIRouter(prefix="/production", tags=["Production"])
@@ -239,6 +239,52 @@ async def complete_production_batch(
             details=details,
         )
     return schemas.ProductionBatchResponse.model_validate(batch)
+
+
+@router.delete("/batches/{batch_id}", status_code=204)
+async def delete_production_batch(
+    batch_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_roles(UserRole.admin)),
+):
+    """Hard-delete a completed ProductionBatch and roll back its inventory
+    impact: append reversing StockMovement rows, decrement variant sellable
+    and damaged counters by the batch's good/damaged quantities, then drop
+    the batch row. Admin-only.
+
+    Refused with structured error code when:
+      - the batch is pending or in_progress  (batch_not_completed)
+      - rollback would push variant counters below zero
+        (batch_rollback_would_underflow)
+      - the batch predates migration 013 and its stock_movements carry no
+        batch_id linkage (batch_legacy_no_movement_link)
+    """
+    existing = await service.get_production_batch_by_id(db, batch_id)
+    snapshot = {
+        "product_id": existing.product_id,
+        "variant_id": existing.variant_id,
+        "quantity_to_produce": existing.quantity_to_produce,
+        "good_quantity": existing.good_quantity,
+        "damaged_quantity": existing.damaged_quantity,
+        "defect_reason": existing.defect_reason,
+        "current_stage": existing.current_stage,
+        "stage_status": existing.stage_status,
+        "stock_added": existing.stock_added,
+        "completed_at": existing.completed_at.isoformat() if existing.completed_at else None,
+    }
+    summary = await service.delete_production_batch(db, batch_id, admin_id=admin.id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="production.batch_deleted",
+        entity_type="production_batch",
+        entity_id=batch_id,
+        old_values=snapshot,
+        details=(
+            f"Rolled back {summary['materials_reversed']} material movement(s), "
+            f"-{summary['good_reversed']} good, -{summary['damaged_reversed']} Խոտան"
+        ),
+    )
 
 
 # ── Order-based ProductionStage endpoints ────────────────
