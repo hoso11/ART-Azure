@@ -287,6 +287,56 @@ async def delete_production_batch(
     )
 
 
+@router.delete("/batches/{batch_id}/force", status_code=204)
+async def force_delete_production_batch(
+    batch_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_roles(UserRole.admin)),
+):
+    """ADMIN ONLY. Force-delete a completed ProductionBatch WITHOUT rolling
+    back inventory. Reserved for legacy batches created before migration
+    `013_stock_movement_batch_id` whose stock_movements rows carry no
+    batch_id linkage.
+
+    DANGEROUS:
+      * Materials are NOT restored to inventory.
+      * Sellable stock (variant.stock_quantity) is NOT decremented.
+      * Damaged stock (variant.damaged_stock_quantity) is NOT decremented.
+      * Reports may no longer fully reconcile against this legacy batch.
+      * The action is irreversible.
+
+    Refused with structured error code when:
+      - the batch is pending or in_progress  (batch_not_completed)
+      - the batch has linked stock_movements (batch_has_linked_movements);
+        the safe DELETE /production/batches/{id} path must be used instead.
+    """
+    existing = await service.get_production_batch_by_id(db, batch_id)
+    snapshot = {
+        "product_id": existing.product_id,
+        "variant_id": existing.variant_id,
+        "quantity_to_produce": existing.quantity_to_produce,
+        "good_quantity": existing.good_quantity,
+        "damaged_quantity": existing.damaged_quantity,
+        "defect_reason": existing.defect_reason,
+        "current_stage": existing.current_stage,
+        "stage_status": existing.stage_status,
+        "stock_added": existing.stock_added,
+        "completed_at": existing.completed_at.isoformat() if existing.completed_at else None,
+    }
+    await service.force_delete_production_batch(db, batch_id, admin_id=admin.id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="production.batch_force_deleted",
+        entity_type="production_batch",
+        entity_id=batch_id,
+        old_values=snapshot,
+        details=(
+            "Force deleted legacy production batch without inventory rollback."
+        ),
+    )
+
+
 # ── Order-based ProductionStage endpoints ────────────────
 
 @router.post(

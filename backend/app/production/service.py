@@ -1051,3 +1051,81 @@ async def delete_production_batch(
         admin_id=admin_id,
     )
     return summary
+
+
+async def force_delete_production_batch(
+    db: AsyncSession,
+    batch_id: int,
+    *,
+    admin_id: int,
+) -> dict:
+    """ADMIN ONLY. Hard-delete a completed ProductionBatch WITHOUT rolling
+    back inventory. Reserved for legacy batches that predate migration
+    `013_stock_movement_batch_id` — their `stock_movements` rows carry no
+    `batch_id` linkage, so a safe rollback cannot be computed.
+
+    Refusal codes:
+      batch_not_completed         — batch is pending/in_progress.
+      batch_has_linked_movements  — batch HAS linked stock_movements
+                                     (batch_id-tagged). The safe rollback
+                                     path (`delete_production_batch`) must be
+                                     used instead — force-delete is reserved
+                                     for legacy batches.
+
+    Side effects on success:
+      * The batch row is hard-deleted.
+      * No StockMovement is written, appended, or modified.
+      * `Inventory.quantity_on_hand` is unchanged.
+      * `ProductVariant.stock_quantity` and `damaged_stock_quantity` are
+        unchanged. Reports may no longer fully reconcile against this
+        legacy batch — this is the documented trade-off the caller accepted.
+
+    Returns: {"materials_reversed": 0, "good_reversed": 0, "damaged_reversed": 0,
+              "force_deleted": True} so the audit-log details string can
+              report the no-op nature of the rollback explicitly.
+    """
+    from app.inventory.models import StockMovement
+
+    batch_result = await db.execute(
+        select(ProductionBatch).where(ProductionBatch.id == batch_id).with_for_update()
+    )
+    batch = batch_result.scalar_one_or_none()
+    if batch is None:
+        raise NotFoundException(detail=f"Production batch {batch_id} not found")
+
+    if batch.stage_status != "completed" or not batch.stock_added:
+        raise ValidationException(
+            detail="Կարելի է ուժով ջնջել միայն ավարտված արտադրությունները",
+            code="batch_not_completed",
+        )
+
+    linked_count = (await db.execute(
+        select(func.count()).select_from(StockMovement)
+        .where(StockMovement.batch_id == batch.id)
+    )).scalar()
+    if linked_count and linked_count > 0:
+        raise ValidationException(
+            detail=(
+                "Այս արտադրությունը ունի կապակցված շարժեր: "
+                "օգտագործեք սովորական ջնջումը՝ պաշարի վերականգնմամբ:"
+            ),
+            code="batch_has_linked_movements",
+        )
+
+    await db.delete(batch)
+    await db.flush()
+
+    logger.warning(
+        "production.batch_force_deleted",
+        batch_id=batch_id,
+        variant_id=batch.variant_id,
+        good_quantity=batch.good_quantity,
+        damaged_quantity=batch.damaged_quantity,
+        admin_id=admin_id,
+    )
+    return {
+        "materials_reversed": 0,
+        "good_reversed": 0,
+        "damaged_reversed": 0,
+        "force_deleted": True,
+    }

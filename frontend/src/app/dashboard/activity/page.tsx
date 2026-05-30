@@ -41,6 +41,7 @@ const ACTION_LABELS: Record<string, string> = {
   "production.batch_completed": "Արտադրությունն ավարտվեց",
   "production.batch_progress": "Արտադրության մասնակի պահպանում",
   "production.batch_deleted": "Արտադրությունը ջնջվեց",
+  "production.batch_force_deleted": "Արտադրությունը ուժով ջնջվեց (առանց վերականգնման)",
   "production.stage_updated": "Փուլը փոփոխվեց",
   "production.stage_status_changed": "Փուլի կարգավիճակը փոխվեց",
   "production.order_current_changed": "Արտադրության փուլը փոխվեց",

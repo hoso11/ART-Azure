@@ -1566,3 +1566,249 @@ async def test_delete_idempotent_second_call_404(
     second = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=admin_cookies)
     assert second.status_code == 404
     assert second.json()["code"] == "not_found"
+
+
+# ── DELETE /production/batches/{id}/force — admin legacy force-delete ───────
+
+
+async def _null_batch_id_on_movements(db_session, batch_id):
+    """Simulate a legacy batch: detach the stock_movements rows from the
+    batch by setting batch_id = NULL. This is the on-disk state of any
+    completed batch created before migration 013_stock_movement_batch_id."""
+    from app.inventory.models import StockMovement
+    from sqlalchemy import select as _select_inner
+    rows = (await db_session.execute(
+        _select_inner(StockMovement).where(StockMovement.batch_id == batch_id)
+    )).scalars().all()
+    for r in rows:
+        r.batch_id = None
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_force_delete_legacy_completed_batch_succeeds_no_rollback(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session,
+):
+    """Admin force-deletes a legacy batch (no linked movements). Materials,
+    sellable stock, and damaged stock must all remain unchanged."""
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="FORCE-OK-001", size="M", color="Maroon"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-FORCE-001", qty=50)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=10
+    )
+    batch_id = create_resp.json()["id"]
+    # Materials deducted: 50 - 10 = 40.
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("40")
+    await _complete_batch_assert_ok(
+        client, admin_cookies, batch_id, good=6, damaged=4, reason="defect",
+    )
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == 6
+    assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == 4
+
+    # Make it look like a pre-013 legacy batch.
+    await _null_batch_id_on_movements(db_session, batch_id)
+
+    # Safe delete should now refuse — exercises the legacy-detection path.
+    safe = await client.delete(f"/api/v1/production/batches/{batch_id}", cookies=admin_cookies)
+    assert safe.status_code == 422
+    assert safe.json()["code"] == "batch_legacy_no_movement_link"
+
+    # Force delete succeeds.
+    force = await client.delete(
+        f"/api/v1/production/batches/{batch_id}/force", cookies=admin_cookies,
+    )
+    assert force.status_code == 204, force.text
+
+    # Inventory and variant counters untouched.
+    assert await _material_qty(client, admin_cookies, mat_id) == Decimal("40")
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == 6
+    assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "role_name",
+    ["director", "production_manager", "warehouse_manager", "simple_user"],
+)
+async def test_force_delete_non_admin_forbidden(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session, role_name,
+):
+    from app.users.models import UserRole as _UR
+
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku=f"FORCE-RBAC-{role_name[:6]}", size="M", color="Tan"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku=f"MAT-FORCE-RBAC-{role_name[:6]}", qty=20)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=5
+    )
+    batch_id = create_resp.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=5, damaged=0)
+    await _null_batch_id_on_movements(db_session, batch_id)
+
+    actor = await _make_user_with_role(db_session, _UR(role_name))
+    actor_cookies = _cookies_for_user(actor)
+
+    resp = await client.delete(
+        f"/api/v1/production/batches/{batch_id}/force", cookies=actor_cookies,
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "insufficient_permissions"
+
+
+@pytest.mark.asyncio
+async def test_force_delete_blocked_for_rollback_capable_batch(
+    client: AsyncClient, admin_user, customer, admin_cookies,
+):
+    """v38+ batch with linked stock_movements MUST go through the safe path.
+    Force-delete returns batch_has_linked_movements."""
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="FORCE-LINKED-001", size="M", color="Navy"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-FORCE-LINKED-001", qty=20)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=5
+    )
+    batch_id = create_resp.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=5, damaged=0)
+    # Do NOT NULL the batch_id linkage — this is a normal v38+ batch.
+
+    resp = await client.delete(
+        f"/api/v1/production/batches/{batch_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "batch_has_linked_movements"
+
+
+@pytest.mark.asyncio
+async def test_force_delete_blocked_for_non_completed_batch(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session,
+):
+    """Pending and in-progress batches are not eligible for force-delete."""
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="FORCE-NOTDONE-001", size="M", color="Aqua"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-FORCE-NOTDONE-001", qty=20)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=10
+    )
+    batch_id = create_resp.json()["id"]
+
+    # Pending (no completion at all)
+    resp_pending = await client.delete(
+        f"/api/v1/production/batches/{batch_id}/force", cookies=admin_cookies,
+    )
+    assert resp_pending.status_code == 422
+    assert resp_pending.json()["code"] == "batch_not_completed"
+
+    # In-progress (partial completion)
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=4, damaged=0)
+    await _null_batch_id_on_movements(db_session, batch_id)  # even legacy-style
+    resp_inprog = await client.delete(
+        f"/api/v1/production/batches/{batch_id}/force", cookies=admin_cookies,
+    )
+    assert resp_inprog.status_code == 422
+    assert resp_inprog.json()["code"] == "batch_not_completed"
+
+
+@pytest.mark.asyncio
+async def test_force_delete_writes_audit_row(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session,
+):
+    from app.activity.models import ActivityLog
+    from sqlalchemy import func as _func, select as _sel
+
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="FORCE-AUDIT-001", size="M", color="Coral"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-FORCE-AUDIT-001", qty=10)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=5
+    )
+    batch_id = create_resp.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=3, damaged=2)
+    await _null_batch_id_on_movements(db_session, batch_id)
+
+    before = (await db_session.execute(
+        _sel(_func.count()).select_from(ActivityLog)
+        .where(ActivityLog.action == "production.batch_force_deleted")
+    )).scalar()
+    resp = await client.delete(
+        f"/api/v1/production/batches/{batch_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204
+
+    rows = (await db_session.execute(
+        _sel(ActivityLog).where(ActivityLog.action == "production.batch_force_deleted")
+    )).scalars().all()
+    assert len(rows) - before == 1
+    row = rows[-1]
+    assert row.entity_type == "production_batch"
+    assert row.entity_id == batch_id
+    assert row.details and "Force deleted" in row.details
+    assert row.old_values["good_quantity"] == 3
+    assert row.old_values["damaged_quantity"] == 2
+
+
+@pytest.mark.asyncio
+async def test_force_delete_does_not_touch_inventory_or_variant(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session,
+):
+    """Belt-and-braces check: after a force-delete, the material's
+    stock_movement row count for the affected material is unchanged from
+    immediately before the call. No reversal was appended."""
+    product_id, variant_id = await _make_product(
+        client, admin_cookies, sku="FORCE-NOWRITE-001", size="M", color="Slate"
+    )
+    mat_id = await _make_material(client, admin_cookies, sku="MAT-FORCE-NOWRITE-001", qty=20)
+    await _add_size_requirement(
+        client, admin_cookies, product_id=product_id, material_id=mat_id,
+        size="M", qty_per_item=1,
+    )
+    create_resp = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=5
+    )
+    batch_id = create_resp.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=5, damaged=0)
+    await _null_batch_id_on_movements(db_session, batch_id)
+
+    qty_before = await _material_qty(client, admin_cookies, mat_id)
+    stock_before = await _variant_stock(client, admin_cookies, product_id, variant_id)
+    damaged_before = await _variant_damaged_stock(client, admin_cookies, product_id, variant_id)
+    movements_before = await _stock_movement_count(client, admin_cookies, mat_id)
+
+    resp = await client.delete(
+        f"/api/v1/production/batches/{batch_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204
+
+    assert await _material_qty(client, admin_cookies, mat_id) == qty_before
+    assert await _variant_stock(client, admin_cookies, product_id, variant_id) == stock_before
+    assert await _variant_damaged_stock(client, admin_cookies, product_id, variant_id) == damaged_before
+    if movements_before >= 0:
+        movements_after = await _stock_movement_count(client, admin_cookies, mat_id)
+        assert movements_after == movements_before, (
+            "force-delete must NOT append reversal movements"
+        )
