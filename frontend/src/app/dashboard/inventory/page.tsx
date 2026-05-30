@@ -117,6 +117,22 @@ export default async function InventoryPage({
           </div>
         </CardContent>
       </Card>
+
+      {filter !== "low_stock" && total > 20 && (
+        <div className="flex justify-center gap-2 mt-4">
+          {page > 1 && (
+            <Link href={`/dashboard/inventory?page=${page - 1}`} className="px-3 py-1 text-sm border rounded-lg hover:bg-gray-50">
+              Previous
+            </Link>
+          )}
+          <span className="px-3 py-1 text-sm text-gray-600">Էջ {page}</span>
+          {page * 20 < total && (
+            <Link href={`/dashboard/inventory?page=${page + 1}`} className="px-3 py-1 text-sm border rounded-lg hover:bg-gray-50">
+              Next
+            </Link>
+          )}
+        </div>
+      )}
     </div>
   );
 }
