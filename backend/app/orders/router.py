@@ -208,6 +208,44 @@ async def delete_order(
     )
 
 
+@router.delete("/{order_id}/force", status_code=204)
+async def force_delete_order(
+    order_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_roles(UserRole.admin)),
+):
+    """ADMIN ONLY. Hard-delete an order even when the safe DELETE would
+    refuse (production has started, stock has been deducted).
+
+    DANGEROUS:
+      * Order row, order_items rows, production_stages, production_logs
+        are all removed.
+      * stock_movements.order_id is NULLED (ledger entries preserved with
+        no back-pointer to the deleted order).
+      * Reports that aggregated this order will no longer reconcile.
+      * Activity-log rows from this order's prior actions remain in the
+        feed with snapshots intact, but their entity_id points at a row
+        that no longer exists.
+    """
+    existing = await service.get_order_by_id(db, order_id)
+    snapshot = _order_snapshot(existing)
+    summary = await service.force_delete_order(db, order_id, admin_id=admin.id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="order.force_deleted",
+        entity_type="order",
+        entity_id=order_id,
+        old_values=snapshot,
+        details=(
+            "Force deleted order. Historical production/inventory references may remain. "
+            f"Removed {summary['stages_removed']} production stage(s), "
+            f"orphaned {summary['movement_orphans']} stock movement(s), "
+            f"stock_deducted={summary['stock_deducted_at_delete']}."
+        ),
+    )
+
+
 @router.post("/{order_id}/items", response_model=schemas.OrderItemResponse, status_code=201)
 async def add_order_item(
     order_id: int,

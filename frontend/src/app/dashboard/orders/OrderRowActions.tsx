@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { showToast } from "@/lib/toast";
+import { ForceDeleteOrderButton } from "./ForceDeleteOrderButton";
 
 // Three active statuses. Admin moves freely between any two of these.
 // Historical rows stuck at a deprecated status (in_production / shipped /
@@ -152,6 +153,8 @@ export function OrderRowActions({
       >
         Ջնջել
       </button>
+
+      <ForceDeleteOrderButton orderId={orderId} />
 
       <ConfirmModal
         open={confirmDelete}

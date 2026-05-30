@@ -263,3 +263,190 @@ async def test_delete_order_blocked_leaves_order_and_stages_intact(
         _sa_select(ProductionStage).where(ProductionStage.order_id == order_id)
     )).scalars().all()
     assert len(remaining) == 5
+
+
+# ── DELETE /orders/{id}/force — admin force-delete ──────────────────────────
+
+
+async def _make_user_with_role(db_session, role):
+    from app.users.models import User
+    from app.users.service import hash_password
+    u = User(
+        email=f"{role.value}@orderforce.test.com",
+        hashed_password=hash_password("Passw0rd!"),
+        role=role,
+    )
+    db_session.add(u)
+    await db_session.commit()
+    await db_session.refresh(u)
+    return u
+
+
+def _cookies_for_user(user):
+    from app.auth.service import create_access_token
+    return {"access_token": create_access_token(user.id, user.role.value)}
+
+
+@pytest.mark.asyncio
+async def test_force_delete_clean_order_succeeds(
+    client, customer, admin_cookies, db_session,
+):
+    """Order with no stages, no stock_deducted, no movements → force OK."""
+    from app.orders.models import Order
+    order_id, _ = await _make_order(client, customer, admin_cookies, sku_tag="FORCE-CLEAN")
+
+    resp = await client.delete(f"/api/v1/orders/{order_id}/force", cookies=admin_cookies)
+    assert resp.status_code == 204, resp.text
+
+    gone = (await db_session.execute(
+        _sa_select(Order).where(Order.id == order_id)
+    )).scalar_one_or_none()
+    assert gone is None
+
+
+@pytest.mark.asyncio
+async def test_force_delete_with_pending_and_started_stages_clears_them(
+    client, customer, admin_cookies, db_session,
+):
+    """Force delete must remove all production_stages regardless of status,
+    plus their production_logs via the ORM cascade. Unlike safe-delete which
+    refuses non-pending stages."""
+    from app.production.models import ProductionStage, StageStatus, ProductionLog
+    order_id, _ = await _make_order(client, customer, admin_cookies, sku_tag="FORCE-STAGES")
+    seed = await client.post(f"/api/v1/production/orders/{order_id}/stages", cookies=admin_cookies)
+    assert seed.status_code == 201
+
+    # Advance one stage past pending so safe-delete would refuse.
+    stage = (await db_session.execute(
+        _sa_select(ProductionStage).where(ProductionStage.order_id == order_id).limit(1)
+    )).scalar_one()
+    # Add a transition log so the cascade has something to do.
+    log = ProductionLog(
+        production_stage_id=stage.id,
+        changed_by=1,
+        previous_status=StageStatus.pending,
+        new_status=StageStatus.in_progress,
+    )
+    db_session.add(log)
+    stage.status = StageStatus.in_progress
+    await db_session.commit()
+
+    # Confirm safe delete refuses with the v37 guard.
+    safe = await client.delete(f"/api/v1/orders/{order_id}", cookies=admin_cookies)
+    assert safe.status_code == 422
+    assert safe.json()["code"] == "order_has_active_production"
+
+    # Force delete succeeds and clears stages + logs.
+    force = await client.delete(f"/api/v1/orders/{order_id}/force", cookies=admin_cookies)
+    assert force.status_code == 204, force.text
+
+    stages_after = (await db_session.execute(
+        _sa_select(ProductionStage).where(ProductionStage.order_id == order_id)
+    )).scalars().all()
+    assert stages_after == []
+    logs_after = (await db_session.execute(
+        _sa_select(ProductionLog).where(ProductionLog.production_stage_id == stage.id)
+    )).scalars().all()
+    assert logs_after == []
+
+
+@pytest.mark.asyncio
+async def test_force_delete_with_stock_deducted_orphans_movements_preserves_ledger(
+    client, customer, admin_cookies, db_session,
+):
+    """The headline policy decision: force-delete with stock_deducted=True
+    sets stock_movements.order_id = NULL rather than deleting movements.
+    Ledger rows must remain in the DB with the original quantity_change."""
+    from app.inventory.models import StockMovement
+    order_id, _ = await _make_order(
+        client, customer, admin_cookies, sku_tag="FORCE-STOCK", stock=20,
+    )
+    # Move order to completed; the existing flow deducts stock + writes
+    # one StockMovement(reason=production_usage) per item with order_id set.
+    resp = await client.patch(
+        f"/api/v1/orders/{order_id}",
+        json={"status": "completed"},
+        cookies=admin_cookies,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["stock_deducted"] is True
+
+    # Safe delete refuses (v37 guard).
+    safe = await client.delete(f"/api/v1/orders/{order_id}", cookies=admin_cookies)
+    assert safe.status_code == 422
+    assert safe.json()["code"] == "order_stock_already_deducted"
+
+    # Force delete succeeds and orphans rather than deletes movements.
+    force = await client.delete(f"/api/v1/orders/{order_id}/force", cookies=admin_cookies)
+    assert force.status_code == 204, force.text
+
+    # The ledger rows that used to point at this order survive with order_id=NULL.
+    orphaned = (await db_session.execute(
+        _sa_select(StockMovement).where(StockMovement.order_id == order_id)
+    )).scalars().all()
+    assert orphaned == []  # none still reference this order_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "role_name",
+    ["director", "production_manager", "warehouse_manager", "simple_user"],
+)
+async def test_force_delete_non_admin_forbidden(
+    client, customer, admin_cookies, db_session, role_name,
+):
+    from app.users.models import UserRole as _UR
+    order_id, _ = await _make_order(
+        client, customer, admin_cookies, sku_tag=f"FORCE-RBAC-{role_name[:5]}",
+    )
+    actor = await _make_user_with_role(db_session, _UR(role_name))
+    actor_cookies = _cookies_for_user(actor)
+    resp = await client.delete(
+        f"/api/v1/orders/{order_id}/force", cookies=actor_cookies,
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "insufficient_permissions"
+
+
+@pytest.mark.asyncio
+async def test_force_delete_writes_audit_row(
+    client, customer, admin_cookies, db_session,
+):
+    order_id, _ = await _make_order(client, customer, admin_cookies, sku_tag="FORCE-AUDIT")
+    await client.post(f"/api/v1/production/orders/{order_id}/stages", cookies=admin_cookies)
+
+    before = (await db_session.execute(
+        _sa_select(func.count()).select_from(ActivityLog)
+        .where(ActivityLog.action == "order.force_deleted")
+    )).scalar() or 0
+
+    resp = await client.delete(f"/api/v1/orders/{order_id}/force", cookies=admin_cookies)
+    assert resp.status_code == 204
+
+    rows = (await db_session.execute(
+        _sa_select(ActivityLog).where(ActivityLog.action == "order.force_deleted")
+    )).scalars().all()
+    assert len(rows) - before == 1
+    row = rows[-1]
+    assert row.entity_type == "order"
+    assert row.entity_id == order_id
+    assert row.details and "Force deleted order" in row.details
+    assert "5" in row.details  # the 5 stages cleared
+
+
+@pytest.mark.asyncio
+async def test_force_delete_not_found_returns_404(client, admin_cookies):
+    resp = await client.delete("/api/v1/orders/999999/force", cookies=admin_cookies)
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_normal_delete_still_works_after_force_endpoint_added(
+    client, customer, admin_cookies,
+):
+    """Regression: the existing safe DELETE path keeps its v37 semantics."""
+    order_id, _ = await _make_order(client, customer, admin_cookies, sku_tag="FORCE-REG")
+    await client.post(f"/api/v1/production/orders/{order_id}/stages", cookies=admin_cookies)
+    resp = await client.delete(f"/api/v1/orders/{order_id}", cookies=admin_cookies)
+    assert resp.status_code == 204  # all-pending stages → v37 auto-removes them

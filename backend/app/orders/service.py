@@ -332,3 +332,67 @@ async def get_order_stats(db: AsyncSession) -> dict:
         "active": active.scalar(),
         "delayed": delayed.scalar(),
     }
+
+
+async def force_delete_order(
+    db: AsyncSession,
+    order_id: int,
+    *,
+    admin_id: int,
+) -> dict:
+    """ADMIN ONLY. Hard-delete an order even when the normal safe delete
+    would refuse (production has started, stock has been deducted, etc.).
+
+    Inventory ledger is preserved: `stock_movements.order_id` is set to NULL
+    on every row referencing this order, so the inventory deduction record
+    stays accurate but the back-pointer to the now-deleted order is gone.
+
+    Cascades:
+      * order_items   — removed via the existing Order.items ORM cascade.
+      * production_stages — per-row ORM delete (so the Stage→ProductionLog
+                            relationship cascade also clears production_logs).
+
+    Returns {stages_removed, movement_orphans, stock_deducted_at_delete} for
+    the audit log details string.
+    """
+    from sqlalchemy import update
+    from app.production.models import ProductionStage
+    from app.inventory.models import StockMovement
+
+    order = await get_order_by_id(db, order_id)
+    pre_stock_deducted = order.stock_deducted
+
+    # 1. Orphan stock_movements (preserve ledger, drop back-pointer).
+    movement_result = await db.execute(
+        update(StockMovement)
+        .where(StockMovement.order_id == order_id)
+        .values(order_id=None)
+    )
+    movement_orphans = movement_result.rowcount or 0
+
+    # 2. Remove production_stages per-row so Stage→ProductionLog cascade fires.
+    stage_result = await db.execute(
+        select(ProductionStage).where(ProductionStage.order_id == order_id)
+    )
+    stages = list(stage_result.scalars().all())
+    for stage in stages:
+        await db.delete(stage)
+    stages_removed = len(stages)
+
+    # 3. db.delete(order) cascades order_items via the existing relationship.
+    await db.delete(order)
+    await db.flush()
+
+    logger.warning(
+        "order.force_deleted",
+        order_id=order_id,
+        admin_id=admin_id,
+        stages_removed=stages_removed,
+        movement_orphans=movement_orphans,
+        stock_deducted_at_delete=pre_stock_deducted,
+    )
+    return {
+        "stages_removed": stages_removed,
+        "movement_orphans": movement_orphans,
+        "stock_deducted_at_delete": pre_stock_deducted,
+    }

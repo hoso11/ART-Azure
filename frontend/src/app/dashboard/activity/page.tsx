@@ -34,6 +34,7 @@ const ACTION_LABELS: Record<string, string> = {
   "order.created": "Պատվեր ստեղծվեց",
   "order.updated": "Պատվեր փոփոխվեց",
   "order.deleted": "Պատվեր ջնջվեց",
+  "order.force_deleted": "Պատվերը ուժով ջնջվեց (պատմությունը կարող է մնալ)",
   "order.status_changed": "Պատվերի կարգավիճակը փոխվեց",
   "order.item_added": "Պատվերի տող ավելացվեց",
   "order.item_removed": "Պատվերի տող հեռացվեց",
