@@ -56,7 +56,7 @@ export function ForceDeleteOrderButton({ orderId }: { orderId: number }) {
         className="text-red-800 hover:underline text-sm whitespace-nowrap"
         title="Ուժով ջնջել (չի վերականգնվում)"
       >
-        Ուժով
+        Ուժով ջնջել
       </button>
       {open && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center px-4">

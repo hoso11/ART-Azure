@@ -8,6 +8,7 @@ import { FormField, Input, Select } from "@/components/ui/FormField";
 import { Customer } from "@/types";
 import type { UserRole } from "@/types/models";
 import { allowedRolesFor, ROLE_LABELS } from "@/lib/permissions";
+import { showToast } from "@/lib/toast";
 
 interface CreateUserButtonProps {
   customers: Customer[];
@@ -165,15 +166,23 @@ export function DeactivateUserButton({ userId, isActive }: DeactivateUserButtonP
       });
 
       if (!res.ok && res.status !== 204) {
-        const data = await res.json();
-        setError(data.detail || "Operation failed");
+        const data = await res.json().catch(() => ({}));
+        const msg = data?.detail || "Չհաջողվեց կատարել գործողությունը";
+        setError(msg);
+        showToast(msg, "error");
         return;
       }
 
       setConfirmOpen(false);
+      showToast(
+        isActive ? "Օգտատերը ապակտիվացվեց" : "Օգտատերը վերակտիվացվեց",
+        "success",
+      );
       router.refresh();
     } catch {
-      setError("Connection error");
+      const msg = "Կապի սխալ. չհաջողվեց կատարել գործողությունը";
+      setError(msg);
+      showToast(msg, "error");
     } finally {
       setLoading(false);
     }

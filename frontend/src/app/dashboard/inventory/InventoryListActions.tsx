@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Material } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { FormField, Input, Textarea } from "@/components/ui/FormField";
+import { showToast } from "@/lib/toast";
 
 export function AddMaterialButton() {
   const router = useRouter();
@@ -157,7 +158,7 @@ export function EditMaterialButton({ material }: { material: Material }) {
         onClick={() => setOpen(true)}
         className="text-brand-700 hover:text-brand-900 text-sm font-medium"
       >
-        Խմբ.
+        Խմբագրել
       </button>
       {open && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -211,13 +212,18 @@ export function DeleteMaterialButton({ materialId, materialName }: { materialId:
       });
       if (res.status === 204 || res.ok) {
         setConfirming(false);
+        showToast("Նյութը ջնջվեց", "success");
         router.refresh();
       } else {
-        const data = await res.json();
-        setError(data.detail || "Չհաջողվեց ջնջել");
+        const data = await res.json().catch(() => ({}));
+        const msg = data?.detail || "Չհաջողվեց ջնջել նյութը";
+        setError(msg);
+        showToast(msg, "error");
       }
     } catch {
-      setError("Կապի սխալ");
+      const msg = "Կապի սխալ. չհաջողվեց ջնջել նյութը";
+      setError(msg);
+      showToast(msg, "error");
     } finally {
       setLoading(false);
     }
@@ -230,7 +236,7 @@ export function DeleteMaterialButton({ materialId, materialName }: { materialId:
         onClick={() => setConfirming(true)}
         className="text-red-600 hover:text-red-800 text-sm font-medium"
       >
-        Ջնջ.
+        Ջնջել
       </button>
       {confirming && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">

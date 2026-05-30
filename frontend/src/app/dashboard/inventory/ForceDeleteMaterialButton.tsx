@@ -8,10 +8,6 @@ import { clientFetch } from "@/lib/api.client";
 const ERROR_MESSAGES: Record<string, string> = {
   material_quantity_not_zero:
     "Հնարավոր չէ ուժով ջնջել. քանակը 0 չէ:",
-  material_has_stock_movements:
-    "Հնարավոր չէ ուժով ջնջել. կան պահեստի շարժեր: Պատմությունը պահպանվում է:",
-  material_has_recipe_links:
-    "Հնարավոր չէ ուժով ջնջել. նյութը կապված է բաղադրատոմսի հետ:",
   insufficient_permissions:
     "Չունեք իրավասություն ուժով ջնջելու նյութը:",
   not_found: "Նյութը արդեն ջնջվել է:",
@@ -70,7 +66,7 @@ export function ForceDeleteMaterialButton({
         className="text-red-800 hover:underline text-sm font-medium whitespace-nowrap"
         title="Ուժով ջնջել (առանց պաշարի վերականգնման)"
       >
-        Ուժով
+        Ուժով ջնջել
       </button>
       {open && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center px-4">
@@ -97,15 +93,21 @@ export function ForceDeleteMaterialButton({
                 Առկա քանակը հաստատվում է որպես <strong>0</strong>:
               </li>
               <li>
-                Գործողությունը <strong>անդարձելի</strong> է:
+                Բաղադրատոմսի կապերը (բոլոր ապրանքների վրա) ավտոմատ կհեռացվեն:
               </li>
               <li>
-                Պահեստի շարժերի պատմությունը կարող է մնալ ՝ որպես աուդիտ:
+                Պահեստի շարժերի պատմությունը <strong>կպահպանվի</strong>, բայց
+                այս նյութի անունը կնշվի որպես <em>ջնջված</em>:
+              </li>
+              <li>
+                Պատմական հաշվետվությունները կարող են ցուցադրել կախված հղումներ:
+              </li>
+              <li>
+                Գործողությունը <strong>անդարձելի</strong> է:
               </li>
             </ul>
             <p className="text-xs text-gray-500 mt-3">
-              Եթե նյութը կապված է բաղադրատոմսի հետ կամ ունի պահեստի շարժեր,
-              ուժով ջնջումը կարգելափակվի:
+              Միակ սահմանափակումը՝ առկա քանակը պետք է լինի 0:
             </p>
             <p className="text-sm text-gray-800 mt-4">
               Շարունակելու համար մուտքագրեք{" "}

@@ -6,6 +6,7 @@ import { ImageUpload } from "@/components/ui/ImageUpload";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ProductImage } from "@/types";
+import { showToast } from "@/lib/toast";
 
 interface ProductImageUploadProps {
   productId: number;
@@ -63,15 +64,20 @@ export function ProductImageUpload({
       });
 
       if (!res.ok && res.status !== 204) {
-        const data = await res.json();
-        setError(data.detail || "Failed to delete image");
+        const data = await res.json().catch(() => ({}));
+        const msg = data?.detail || "Չհաջողվեց ջնջել նկարը";
+        setError(msg);
+        showToast(msg, "error");
         return;
       }
 
       setDeleteConfirm(null);
+      showToast("Նկարը ջնջվեց", "success");
       router.refresh();
     } catch {
-      setError("Connection error");
+      const msg = "Կապի սխալ. չհաջողվեց ջնջել նկարը";
+      setError(msg);
+      showToast(msg, "error");
     } finally {
       setDeleting(null);
     }

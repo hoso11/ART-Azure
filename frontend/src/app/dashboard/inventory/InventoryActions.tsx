@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Material } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { FormField, Input, Textarea } from "@/components/ui/FormField";
+import { showToast } from "@/lib/toast";
 
 export function EditMaterialForm({ material }: { material: Material }) {
   const router = useRouter();
@@ -113,14 +114,19 @@ export function DeleteMaterialButton({ materialId, materialName }: { materialId:
         credentials: "include",
       });
       if (res.status === 204 || res.ok) {
+        showToast("Նյութը ջնջվեց", "success");
         router.push("/dashboard/inventory");
         router.refresh();
       } else {
         const data = await res.json().catch(() => ({}));
-        setError(data.detail || "Չhajogvets jnjel");
+        const msg = data?.detail || "Չհաջողվեց ջնջել նյութը";
+        setError(msg);
+        showToast(msg, "error");
       }
     } catch {
-      setError("Connection error");
+      const msg = "Կապի սխալ. չհաջողվեց ջնջել նյութը";
+      setError(msg);
+      showToast(msg, "error");
     } finally {
       setLoading(false);
     }

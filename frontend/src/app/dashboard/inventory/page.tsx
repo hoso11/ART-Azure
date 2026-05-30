@@ -52,6 +52,11 @@ export default async function InventoryPage({
 
       <Card>
         <CardContent className="p-0">
+          {/* overflow-x-auto: the actions column has up to 4 buttons
+              (Տեսնել / Խմբագրել / Ջնջել / Ուժով ջնջել) which can push the table
+              past the Card edge on narrower viewports. Horizontal scroll
+              keeps every action reachable. */}
+          <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
@@ -89,10 +94,10 @@ export default async function InventoryPage({
                         <Badge className="bg-green-100 text-green-800">OK</Badge>
                       )}
                     </td>
-                    <td className="px-6 py-4 text-right">
+                    <td className="px-6 py-4 text-right whitespace-nowrap">
                       <div className="flex items-center justify-end gap-3">
                         <Link href={`/dashboard/inventory/${material.id}`} className="text-brand-700 hover:text-brand-900 text-sm font-medium">
-                          Տես.
+                          Տեսնել
                         </Link>
                         <EditMaterialButton material={material} />
                         <DeleteMaterialButton materialId={material.id} materialName={material.name} />
@@ -109,6 +114,7 @@ export default async function InventoryPage({
               })}
             </tbody>
           </table>
+          </div>
         </CardContent>
       </Card>
     </div>

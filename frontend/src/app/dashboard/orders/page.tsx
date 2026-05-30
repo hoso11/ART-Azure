@@ -101,7 +101,7 @@ export default async function OrdersPage({
                         {order.deadline ? formatDate(order.deadline) : "—"}
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-600">{formatDate(order.created_at)}</td>
-                      <td className="px-6 py-4 text-right">
+                      <td className="px-6 py-4 text-right whitespace-nowrap">
                         {session.role === "admin" ? (
                           <OrderRowActions
                             orderId={order.id}

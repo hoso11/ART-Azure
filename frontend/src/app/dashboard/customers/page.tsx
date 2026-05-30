@@ -27,6 +27,7 @@ export default async function CustomersPage({
 
       <Card>
         <CardContent className="p-0">
+          <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
@@ -55,15 +56,16 @@ export default async function CustomersPage({
                     </Badge>
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-600">{formatDate(customer.created_at)}</td>
-                  <td className="px-6 py-4 text-right">
+                  <td className="px-6 py-4 text-right whitespace-nowrap">
                     <Link href={`/dashboard/customers/${customer.id}`} className="text-brand-700 hover:underline text-sm">
-                      View
+                      Տեսնել
                     </Link>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         </CardContent>
       </Card>
     </div>

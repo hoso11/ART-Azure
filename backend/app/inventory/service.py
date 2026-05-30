@@ -190,29 +190,42 @@ async def force_delete_material(
     *,
     admin_id: int,
 ) -> dict:
-    """ADMIN ONLY. Hard-delete a Material AND its 1:1 Inventory row WITHOUT
-    touching the inventory ledger. Reserved for materials whose
-    `inventory.quantity_on_hand` is exactly zero.
+    """ADMIN ONLY. Hard-delete a Material when its `quantity_on_hand == 0`.
 
-    The Inventory row is a counter at zero by the time we reach this path,
-    so removing it destroys no history. StockMovement rows are append-only
-    audit and are NEVER deleted by this endpoint — if any exist, we refuse
-    with a structured code so the admin sees exactly why.
+    Behavior (since migration 014_stock_movement_mat_null):
 
-    Refusal codes:
-      material_quantity_not_zero    — inventory.quantity_on_hand != 0.
-      material_has_stock_movements  — at least one StockMovement row
-                                       references this material. Audit ledger
-                                       preservation wins; the row stays.
-      material_has_recipe_links     — at least one ProductMaterial or
-                                       ProductSizeMaterialRequirement row
-                                       references this material. Admin must
-                                       clear the recipe linkage first via the
-                                       existing endpoints.
+      1. Refuse if `inventory.quantity_on_hand != 0`
+         (code `material_quantity_not_zero`, 422). This is the only refusal.
 
-    Returns: {"inventory_row_deleted": True, "stock_movements_preserved": 0,
-              "recipe_links_preserved": 0} for the audit details string.
+      2. **Preserve ledger history**: for every StockMovement that
+         references this material, snapshot the material's name into
+         `material_name_snapshot` and NULL out `material_id`. The row
+         survives with quantity_change, reason, batch_id, order_id,
+         created_by, created_at all intact. Material-consumption reports
+         render the snapshot when the FK join returns NULL.
+
+      3. **Cascade-delete recipe metadata**: `product_materials` and
+         `product_size_material_requirements` rows that reference this
+         material are removed. Recipe rows are current metadata, not
+         history; admin explicitly opted in via the FORCE DELETE typed
+         gate.
+
+      4. Delete the 1:1 Inventory row (counter at zero, not history).
+
+      5. Delete the Material row.
+
+    All inside one transaction. Any failure rolls everything back via
+    `get_db`'s exception handler.
+
+    Returns a summary dict for the audit-log `details` string:
+        {
+          "inventory_row_deleted": bool,
+          "stock_movements_snapshotted": int,   # rows preserved as orphans
+          "product_materials_removed": int,
+          "size_requirements_removed": int,
+        }
     """
+    from sqlalchemy import update as sqla_update
     from app.products.models import ProductMaterial, ProductSizeMaterialRequirement
 
     material_result = await db.execute(
@@ -236,38 +249,32 @@ async def force_delete_material(
             code="material_quantity_not_zero",
         )
 
-    movement_count = (await db.execute(
-        select(func.count()).select_from(StockMovement)
+    # Snapshot material name onto every referencing stock movement, then
+    # NULL the FK. Single UPDATE statement; rowcount tells us how many
+    # ledger rows we preserved as orphans.
+    snapshot_result = await db.execute(
+        sqla_update(StockMovement)
         .where(StockMovement.material_id == material_id)
-    )).scalar() or 0
-    if movement_count > 0:
-        raise ValidationException(
-            detail=(
-                f"Հնարավոր չէ ուժով ջնջել: կան {movement_count} պահեստի շարժ: "
-                "Պատմությունը պահպանվում է:"
-            ),
-            code="material_has_stock_movements",
+        .values(
+            material_name_snapshot=material.name,
+            material_id=None,
         )
+    )
+    stock_movements_snapshotted = snapshot_result.rowcount or 0
 
-    pm_count = (await db.execute(
-        select(func.count()).select_from(ProductMaterial)
-        .where(ProductMaterial.material_id == material_id)
-    )).scalar() or 0
-    req_count = (await db.execute(
-        select(func.count()).select_from(ProductSizeMaterialRequirement)
+    # Cascade-delete recipe metadata. Two bulk DELETE statements.
+    from sqlalchemy import delete as sqla_delete
+    pm_result = await db.execute(
+        sqla_delete(ProductMaterial).where(ProductMaterial.material_id == material_id)
+    )
+    product_materials_removed = pm_result.rowcount or 0
+    req_result = await db.execute(
+        sqla_delete(ProductSizeMaterialRequirement)
         .where(ProductSizeMaterialRequirement.material_id == material_id)
-    )).scalar() or 0
-    if pm_count + req_count > 0:
-        raise ValidationException(
-            detail=(
-                f"Հնարավոր չէ ուժով ջնջել: կապված է {pm_count + req_count} բաղադրատոմսի հետ: "
-                "Նախ հեռացրեք բաղադրատոմսի կապը:"
-            ),
-            code="material_has_recipe_links",
-        )
+    )
+    size_requirements_removed = req_result.rowcount or 0
 
-    # All checks passed. Delete the Inventory row (counter at zero, not
-    # history) then the Material row. Both inside the same transaction.
+    # Delete the 1:1 Inventory row, then the Material row.
     inventory_row_deleted = False
     if inventory is not None:
         await db.delete(inventory)
@@ -277,14 +284,16 @@ async def force_delete_material(
 
     summary = {
         "inventory_row_deleted": inventory_row_deleted,
-        "stock_movements_preserved": 0,
-        "recipe_links_preserved": 0,
+        "stock_movements_snapshotted": stock_movements_snapshotted,
+        "product_materials_removed": product_materials_removed,
+        "size_requirements_removed": size_requirements_removed,
     }
     logger.warning(
         "inventory.material_force_deleted",
         material_id=material_id,
         material_sku=material.sku,
+        material_name=material.name,
         admin_id=admin_id,
-        inventory_row_deleted=inventory_row_deleted,
+        **summary,
     )
     return summary

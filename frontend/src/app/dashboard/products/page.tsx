@@ -59,11 +59,11 @@ export default async function ProductsPage({
                       <StatusBadge status={product.is_active ? "completed" : "cancelled"} />
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-600">{formatDate(product.created_at)}</td>
-                    <td className="px-6 py-4 text-right">
+                    <td className="px-6 py-4 text-right whitespace-nowrap">
                       <div className="flex flex-col items-end gap-1 whitespace-nowrap">
                         <div className="flex items-center justify-end gap-3">
                           <Link href={`/dashboard/products/${product.id}`} className="text-brand-700 hover:underline text-sm">
-                            View
+                            Տեսնել
                           </Link>
                           {/* Force-delete: admin + archived + zero variants. */}
                           {isAdmin && !product.is_active && product.variants.length === 0 && (

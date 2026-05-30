@@ -42,7 +42,12 @@ class StockMovement(Base):
     __tablename__ = "stock_movements"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    material_id: Mapped[int] = mapped_column(Integer, ForeignKey("materials.id"), nullable=False)
+    # Nullable since migration 014_stock_movement_mat_null. Set to NULL by
+    # the admin force-delete-material flow, which snapshots the material
+    # name into material_name_snapshot before NULLing this column. Ledger
+    # row otherwise stays intact for material-consumption reports.
+    material_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("materials.id"), nullable=True)
+    material_name_snapshot: Mapped[str | None] = mapped_column(String(255), nullable=True)
     order_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("orders.id"), nullable=True)
     # FK to ProductionBatch added in migration 013_stock_movement_batch_id.
     # Populated by stock-based production paths so the admin-only batch

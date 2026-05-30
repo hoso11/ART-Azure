@@ -72,6 +72,7 @@ export default async function ProductionPage({
 
       <Card>
         <CardContent className="p-0">
+          <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
@@ -98,7 +99,7 @@ export default async function ProductionPage({
                   <td className="px-6 py-4"><StatusBadge status={stage.status} /></td>
                   <td className="px-6 py-4 text-sm text-gray-600">{stage.started_at ? formatDate(stage.started_at) : "—"}</td>
                   <td className="px-6 py-4 text-sm text-gray-600">{stage.completed_at ? formatDate(stage.completed_at) : "—"}</td>
-                  <td className="px-6 py-4 text-right">
+                  <td className="px-6 py-4 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-3 whitespace-nowrap">
                       <OrderCurrentControl
                         orderId={stage.order_id}
@@ -106,7 +107,7 @@ export default async function ProductionPage({
                         currentStatus={stage.status}
                       />
                       <Link href={`/dashboard/production/${stage.id}`} className="text-brand-700 hover:underline text-sm">
-                        View
+                        Տեսնել
                       </Link>
                     </div>
                   </td>
@@ -114,6 +115,7 @@ export default async function ProductionPage({
               ))}
             </tbody>
           </table>
+          </div>
         </CardContent>
       </Card>
 
@@ -124,6 +126,7 @@ export default async function ProductionPage({
           <span className="text-xs text-gray-500">Տեսակ՝ Պահեստի համար</span>
         </div>
         <CardContent className="p-0">
+          <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
@@ -183,7 +186,7 @@ export default async function ProductionPage({
                     <StatusBadge status={b.stage_status} />
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-600">{formatDate(b.created_at)}</td>
-                  <td className="px-6 py-4 text-right">
+                  <td className="px-6 py-4 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-3 whitespace-nowrap">
                       <BatchControl
                         batchId={b.id}
@@ -207,6 +210,7 @@ export default async function ProductionPage({
               ))}
             </tbody>
           </table>
+          </div>
         </CardContent>
       </Card>
     </div>

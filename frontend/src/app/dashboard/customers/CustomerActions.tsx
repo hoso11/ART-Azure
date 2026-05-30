@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { FormField, Input, Textarea } from "@/components/ui/FormField";
+import { showToast } from "@/lib/toast";
 
 export function CreateCustomerButton() {
   const router = useRouter();
@@ -139,16 +140,21 @@ export function DeleteCustomerButton({ customerId, customerName }: DeleteCustome
       });
 
       if (!res.ok && res.status !== 204) {
-        const data = await res.json();
-        setError(data.detail || "Failed to delete customer");
+        const data = await res.json().catch(() => ({}));
+        const msg = data?.detail || "Չհաջողվեց ջնջել հաճախորդը";
+        setError(msg);
+        showToast(msg, "error");
         return;
       }
 
       setConfirmOpen(false);
+      showToast("Հաճախորդը արխիվացվեց", "success");
       router.push("/dashboard/customers");
       router.refresh();
     } catch {
-      setError("Connection error");
+      const msg = "Կապի սխալ. չհաջողվեց ջնջել հաճախորդը";
+      setError(msg);
+      showToast(msg, "error");
     } finally {
       setLoading(false);
     }

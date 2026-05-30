@@ -250,12 +250,20 @@ function ProductMaterialRequirementsPanel({
   };
 
   const handleDelete = async (reqId: number) => {
-    const res = await fetch(`/api/v1/products/${productId}/size-requirements/${reqId}`, {
-      method: "DELETE",
-      credentials: "include",
-    });
-    if (res.ok || res.status === 204) {
-      setRequirements((prev) => prev.filter((r) => r.id !== reqId));
+    try {
+      const res = await fetch(`/api/v1/products/${productId}/size-requirements/${reqId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (res.status === 204 || res.ok) {
+        setRequirements((prev) => prev.filter((r) => r.id !== reqId));
+        showToast("Պահանջը հեռացվեց", "success");
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      showToast(data?.detail || "Չհաջողվեց հեռացնել պահանջը", "error");
+    } catch {
+      showToast("Կապի սխալ. չհաջողվեց հեռացնել պահանջը", "error");
     }
   };
 

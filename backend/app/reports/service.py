@@ -510,19 +510,33 @@ async def get_material_consumption_report(
         u_result = await db.execute(select(User).where(User.id.in_(user_ids)))
         users_map = {u.id: u.email for u in u_result.scalars().all()}
 
-    return [
-        {
+    rows = []
+    for m in movements:
+        # Material name resolution: prefer the live FK; fall back to the
+        # denormalized snapshot written by force-delete-material (since
+        # migration 014); finally render a tombstone label if neither
+        # exists (legacy NULL with no snapshot — shouldn't happen but
+        # defensive).
+        if m.material is not None:
+            material_name = m.material.name
+            unit = m.material.unit
+        elif m.material_name_snapshot:
+            material_name = f"{m.material_name_snapshot} (ջնջված)"
+            unit = ""
+        else:
+            material_name = f"Material #{m.material_id}"
+            unit = ""
+        rows.append({
             "id": m.id,
-            "material_name": m.material.name if m.material else f"Material #{m.material_id}",
-            "unit": m.material.unit if m.material else "",
+            "material_name": material_name,
+            "unit": unit,
             "quantity_change": float(m.quantity_change),
             "order_id": m.order_id,
             "reason": m.reason.value,
             "created_at": m.created_at.isoformat(),
             "created_by_email": users_map.get(m.created_by, f"User #{m.created_by}"),
-        }
-        for m in movements
-    ]
+        })
+    return rows
 
 
 def material_consumption_to_csv(data: list[dict]) -> str:

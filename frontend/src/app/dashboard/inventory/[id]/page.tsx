@@ -29,9 +29,9 @@ export default async function MaterialDetailPage({
     <div>
       <Link href="/dashboard/inventory" className="text-sm text-brand-700 hover:underline">&larr; Վերադառնալ պահեստ</Link>
 
-      <div className="flex items-center justify-between mt-1 mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">{material.name}</h1>
-        <div className="flex gap-2 items-center">
+      <div className="flex items-center justify-between mt-1 mb-6 gap-4">
+        <h1 className="text-2xl font-bold text-gray-900 truncate">{material.name}</h1>
+        <div className="flex gap-3 items-center flex-shrink-0 whitespace-nowrap">
           <EditMaterialForm material={material} />
           <DeleteMaterialButton materialId={material.id} materialName={material.name} />
           {/* Pydantic serializes Decimal as string ("0.000"); coerce to

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { FormField, Input, Select, Textarea } from "@/components/ui/FormField";
 import { ProductCategory } from "@/types";
+import { showToast } from "@/lib/toast";
 
 interface CreateProductModalProps {
   categories: ProductCategory[];
@@ -33,16 +34,21 @@ export function DeleteProductButton({ productId, productName }: DeleteProductBut
       });
 
       if (!res.ok && res.status !== 204) {
-        const data = await res.json();
-        setError(data.detail || "Failed to delete product");
+        const data = await res.json().catch(() => ({}));
+        const msg = data?.detail || "Չհաջողվեց ջնջել ապրանքը";
+        setError(msg);
+        showToast(msg, "error");
         return;
       }
 
       setConfirmOpen(false);
+      showToast("Ապրանքը արխիվացվեց", "success");
       router.push("/dashboard/products");
       router.refresh();
     } catch {
-      setError("Connection error");
+      const msg = "Կապի սխալ. չհաջողվեց ջնջել ապրանքը";
+      setError(msg);
+      showToast(msg, "error");
     } finally {
       setLoading(false);
     }

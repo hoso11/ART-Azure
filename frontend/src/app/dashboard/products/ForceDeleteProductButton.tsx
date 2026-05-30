@@ -68,7 +68,7 @@ export function ForceDeleteProductButton({
         className="text-red-800 hover:underline text-sm font-medium whitespace-nowrap"
         title="Ուժով ջնջել (անդարձելի)"
       >
-        Ուժով
+        Ուժով ջնջել
       </button>
       {open && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center px-4">

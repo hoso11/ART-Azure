@@ -122,19 +122,19 @@ async def force_delete_material(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_roles(UserRole.admin)),
 ):
-    """ADMIN ONLY. Force-delete a Material whose inventory is at zero.
+    """ADMIN ONLY. Force-delete a Material when its inventory is at zero.
 
     DANGEROUS:
       * Removes the Material row and its 1:1 Inventory row.
-      * Inventory ledger (`stock_movements`) is NOT modified — refused if
-        any movement references this material.
-      * Recipe linkages must be cleared first — refused if any exist.
+      * Recipe metadata (product_materials + product_size_material_requirements)
+        is cascade-deleted.
+      * Stock movement history is PRESERVED — referencing rows have their
+        material_id set to NULL and material_name_snapshot populated so
+        material-consumption reports remain human-readable.
+      * Historical reports may show orphan ledger references for this material.
 
-    Refusal codes:
-      - material_quantity_not_zero   (422) inventory.quantity_on_hand != 0
-      - material_has_stock_movements (422) any StockMovement references this
-      - material_has_recipe_links    (422) any ProductMaterial /
-        ProductSizeMaterialRequirement references this
+    Refusal code:
+      - material_quantity_not_zero (422) — inventory.quantity_on_hand != 0
     """
     existing = await service.get_material_by_id(db, material_id)
     snapshot = _material_snapshot(existing)
@@ -147,7 +147,11 @@ async def force_delete_material(
         old_values=snapshot,
         details=(
             "Force deleted material with zero stock. "
-            "Inventory ledger preserved."
+            f"Cascaded {summary['product_materials_removed']} product-material "
+            f"and {summary['size_requirements_removed']} size-requirement row(s). "
+            f"Preserved {summary['stock_movements_snapshotted']} ledger row(s) "
+            "as orphans (material_id=NULL, material_name_snapshot retained). "
+            "Historical reports may show orphan references for this material."
         ),
     )
 
