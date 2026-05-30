@@ -446,7 +446,11 @@ export function VariantManager({ productId, variants }: { productId: number; var
             {variants.length === 0 && (
               <tr><td colSpan={6} className="px-6 py-8 text-center text-gray-500 text-sm">Տարբերակատ-ներ չկան</td></tr>
             )}
-            {variants.map((v) => (
+            {variants.map((v) => {
+              const orderCount = v.order_items_count ?? 0;
+              const batchCount = v.production_batches_count ?? 0;
+              const hasBlockers = orderCount > 0 || batchCount > 0;
+              return (
               <React.Fragment key={v.id}>
                 <tr>
                   {editId === v.id ? (
@@ -500,8 +504,28 @@ export function VariantManager({ productId, variants }: { productId: number; var
                     </>
                   )}
                 </tr>
+                {hasBlockers && editId !== v.id && (
+                  <tr className="bg-amber-50">
+                    <td colSpan={6} className="px-6 py-2 text-xs text-amber-900">
+                      <span className="font-medium">Չի կարող ջնջվել՝</span>{" "}
+                      {orderCount > 0 && (
+                        <span>
+                          կապված է <strong>{orderCount}</strong> պատվերի հետ
+                        </span>
+                      )}
+                      {orderCount > 0 && batchCount > 0 && <span>, </span>}
+                      {batchCount > 0 && (
+                        <span>
+                          կապված է <strong>{batchCount}</strong> արտադրության հետ
+                        </span>
+                      )}
+                      :
+                    </td>
+                  </tr>
+                )}
               </React.Fragment>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

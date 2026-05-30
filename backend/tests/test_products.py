@@ -623,3 +623,109 @@ async def test_normal_product_delete_still_soft_deletes(
     )).scalar_one_or_none()
     assert p is not None
     assert p.is_active is False
+
+
+# ── Variant usage counts on product detail ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_variant_usage_counts_default_zero_when_no_references(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage,
+):
+    """Fresh product with a fresh variant: both counts default to 0."""
+    product_id = await _create_product(client, admin_cookies, "VAR-USE-001")
+    v_resp = await client.post(
+        f"/api/v1/products/{product_id}/variants",
+        json={"size": "M", "color": "Red", "price": 5.00},
+        cookies=admin_cookies,
+    )
+    assert v_resp.status_code == 201
+
+    get_resp = await client.get(f"/api/v1/products/{product_id}", cookies=admin_cookies)
+    assert get_resp.status_code == 200
+    body = get_resp.json()
+    assert len(body["variants"]) == 1
+    assert body["variants"][0]["order_items_count"] == 0
+    assert body["variants"][0]["production_batches_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_variant_usage_counts_reflect_order_and_batch_references(
+    client: AsyncClient, admin_user, customer, admin_cookies, fake_storage, db_session,
+):
+    """One variant gets an order_item and a production_batch; another stays
+    untouched. The detail endpoint must report 1/1 for the used variant and
+    0/0 for the unused one."""
+    from app.production.models import ProductionBatch
+
+    product_id = await _create_product(client, admin_cookies, "VAR-USE-002")
+    used = await client.post(
+        f"/api/v1/products/{product_id}/variants",
+        json={"size": "M", "color": "Blue", "price": 10.00, "stock_quantity": 5},
+        cookies=admin_cookies,
+    )
+    unused = await client.post(
+        f"/api/v1/products/{product_id}/variants",
+        json={"size": "L", "color": "Green", "price": 10.00},
+        cookies=admin_cookies,
+    )
+    used_id = used.json()["id"]
+    unused_id = unused.json()["id"]
+
+    # Order referencing the "used" variant.
+    order = await client.post("/api/v1/orders", json={
+        "customer_id": customer.id,
+        "items": [{"product_variant_id": used_id, "quantity": 1, "unit_price": 10.00}],
+    }, cookies=admin_cookies)
+    assert order.status_code == 201
+
+    # Production batch referencing the "used" variant.
+    batch = ProductionBatch(
+        product_id=product_id,
+        variant_id=used_id,
+        quantity_to_produce=1,
+        production_type="stock_based",
+        current_stage="cutting",
+        stage_status="pending",
+        materials_deducted=False,
+        stock_added=False,
+        created_by=admin_user.id,
+    )
+    db_session.add(batch)
+    await db_session.commit()
+
+    get_resp = await client.get(f"/api/v1/products/{product_id}", cookies=admin_cookies)
+    assert get_resp.status_code == 200
+    variants = {v["id"]: v for v in get_resp.json()["variants"]}
+    assert variants[used_id]["order_items_count"] == 1
+    assert variants[used_id]["production_batches_count"] == 1
+    assert variants[unused_id]["order_items_count"] == 0
+    assert variants[unused_id]["production_batches_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_variant_usage_counts_not_populated_on_list_endpoint(
+    client: AsyncClient, admin_user, customer, admin_cookies, fake_storage,
+):
+    """List endpoint deliberately skips the count computation. Variants in
+    the list response carry the default 0 even when references exist."""
+    product_id = await _create_product(client, admin_cookies, "VAR-USE-LIST")
+    used = await client.post(
+        f"/api/v1/products/{product_id}/variants",
+        json={"size": "M", "color": "Black", "price": 5.00, "stock_quantity": 3},
+        cookies=admin_cookies,
+    )
+    used_id = used.json()["id"]
+    await client.post("/api/v1/orders", json={
+        "customer_id": customer.id,
+        "items": [{"product_variant_id": used_id, "quantity": 1, "unit_price": 5.00}],
+    }, cookies=admin_cookies)
+
+    list_resp = await client.get("/api/v1/products", cookies=admin_cookies)
+    assert list_resp.status_code == 200
+    items = list_resp.json()["items"]
+    target = next(p for p in items if p["id"] == product_id)
+    target_variant = next(v for v in target["variants"] if v["id"] == used_id)
+    # Default 0 on list — the field exists but is not computed there.
+    assert target_variant["order_items_count"] == 0
+    assert target_variant["production_batches_count"] == 0

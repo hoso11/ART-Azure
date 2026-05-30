@@ -58,6 +58,11 @@ class VariantResponse(BaseModel):
     stock_quantity: int
     damaged_stock_quantity: int = 0
     discounted_price: Optional[Decimal] = None
+    # Per-variant blocker counts. Populated only by the product detail
+    # endpoint (GET /products/{id}); default 0 elsewhere (e.g. list
+    # endpoint) so the schema stays cheap.
+    order_items_count: int = 0
+    production_batches_count: int = 0
 
     model_config = {"from_attributes": True}
 

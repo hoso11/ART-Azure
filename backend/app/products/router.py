@@ -195,6 +195,10 @@ async def get_product(
     storage: StorageService = Depends(get_storage_service),
 ):
     product = await service.get_product_by_id(db, product_id)
+    # Detail endpoint only — attach per-variant order/batch counts so the
+    # UI can show why a variant cannot be deleted without an extra round
+    # trip. List endpoint deliberately skips this.
+    await service.populate_variant_usage_counts(db, product)
     response = schemas.ProductResponse.model_validate(product)
     _populate_image_urls(response, storage)
     if current_user.role == UserRole.simple_user:

@@ -42,6 +42,10 @@ export interface ProductVariant {
   stock_quantity: number;
   damaged_stock_quantity: number;
   discounted_price?: number | null;
+  // Populated only by the product detail endpoint (GET /products/{id}).
+  // List endpoint returns these as 0 by default.
+  order_items_count?: number;
+  production_batches_count?: number;
 }
 
 export interface ProductImage {

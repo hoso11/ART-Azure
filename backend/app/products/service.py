@@ -110,6 +110,41 @@ async def get_product_by_id(db: AsyncSession, product_id: int) -> Product:
     return product
 
 
+async def populate_variant_usage_counts(db: AsyncSession, product: Product) -> None:
+    """Attach `order_items_count` and `production_batches_count` to every
+    ProductVariant on this product as in-memory attributes (Pydantic's
+    `from_attributes=True` on VariantResponse picks them up).
+
+    Two cheap aggregates (one per child table) using GROUP BY variant_id.
+    Called only by the product detail endpoint, never by the list endpoint.
+    """
+    from app.orders.models import OrderItem
+    from app.production.models import ProductionBatch
+
+    variant_ids = [v.id for v in product.variants]
+    if not variant_ids:
+        return
+
+    oi_rows = (await db.execute(
+        select(OrderItem.product_variant_id, func.count())
+        .where(OrderItem.product_variant_id.in_(variant_ids))
+        .group_by(OrderItem.product_variant_id)
+    )).all()
+    oi_map: dict[int, int] = {row[0]: row[1] for row in oi_rows}
+
+    pb_rows = (await db.execute(
+        select(ProductionBatch.variant_id, func.count())
+        .where(ProductionBatch.variant_id.in_(variant_ids))
+        .group_by(ProductionBatch.variant_id)
+    )).all()
+    pb_map: dict[int, int] = {row[0]: row[1] for row in pb_rows}
+
+    for variant in product.variants:
+        # In-memory only — never persisted; Pydantic reads via from_attributes.
+        variant.order_items_count = oi_map.get(variant.id, 0)
+        variant.production_batches_count = pb_map.get(variant.id, 0)
+
+
 async def create_product(db: AsyncSession, name: str, sku: str, variants: list = None, **kwargs) -> Product:
     existing = await db.execute(select(Product).where(Product.sku == sku))
     if existing.scalar_one_or_none():
