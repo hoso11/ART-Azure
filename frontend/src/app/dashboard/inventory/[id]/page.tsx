@@ -34,7 +34,9 @@ export default async function MaterialDetailPage({
         <div className="flex gap-2 items-center">
           <EditMaterialForm material={material} />
           <DeleteMaterialButton materialId={material.id} materialName={material.name} />
-          {isAdmin && (material.inventory?.quantity_on_hand ?? 0) === 0 && (
+          {/* Pydantic serializes Decimal as string ("0.000"); coerce to
+              Number so the strict-equality gate matches the displayed value. */}
+          {isAdmin && Number(material.inventory?.quantity_on_hand ?? 0) === 0 && (
             <ForceDeleteMaterialButton
               materialId={material.id}
               materialName={material.name}

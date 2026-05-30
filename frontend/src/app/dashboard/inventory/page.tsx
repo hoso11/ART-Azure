@@ -69,7 +69,11 @@ export default async function InventoryPage({
                 <tr><td colSpan={7} className="px-6 py-12 text-center text-gray-500">Նյութեր չեն գտնվել</td></tr>
               )}
               {items.map((material) => {
-                const qty = material.inventory?.quantity_on_hand ?? 0;
+                // Pydantic serializes Decimal as string ("0.000"), but the TS
+                // type claims `number`. Coerce so strict-equality comparisons
+                // (e.g. the Ուժով gate below) behave as documented and the
+                // low-stock comparison stays numeric.
+                const qty = Number(material.inventory?.quantity_on_hand ?? 0);
                 const isLow = material.low_stock_threshold > 0 && qty <= material.low_stock_threshold;
                 return (
                   <tr key={material.id} className="hover:bg-gray-50">
