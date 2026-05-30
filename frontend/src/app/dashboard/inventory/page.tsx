@@ -6,13 +6,15 @@ import { Badge } from "@/components/ui/Badge";
 import { formatNumber } from "@/lib/utils";
 import Link from "next/link";
 import { AddMaterialButton, EditMaterialButton, DeleteMaterialButton } from "./InventoryListActions";
+import { ForceDeleteMaterialButton } from "./ForceDeleteMaterialButton";
 
 export default async function InventoryPage({
   searchParams,
 }: {
   searchParams: Promise<{ page?: string; filter?: string }>;
 }) {
-  await requireModule("inventory");
+  const session = await requireModule("inventory");
+  const isAdmin = session.role === "admin";
   const params = await searchParams;
   const page = parseInt(params.page || "1");
   const filter = params.filter === "low_stock" ? "low_stock" : "";
@@ -90,6 +92,12 @@ export default async function InventoryPage({
                         </Link>
                         <EditMaterialButton material={material} />
                         <DeleteMaterialButton materialId={material.id} materialName={material.name} />
+                        {isAdmin && qty === 0 && (
+                          <ForceDeleteMaterialButton
+                            materialId={material.id}
+                            materialName={material.name}
+                          />
+                        )}
                       </div>
                     </td>
                   </tr>

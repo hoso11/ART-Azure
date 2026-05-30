@@ -29,6 +29,7 @@ const ACTION_LABELS: Record<string, string> = {
   "material.created": "Նյութ ստեղծվեց",
   "material.updated": "Նյութ փոփոխվեց",
   "material.deleted": "Նյութ ջնջվեց",
+  "inventory.material_force_deleted": "Նյութը ուժով ջնջվեց (առանց պատմության ջնջման)",
   "inventory.stock_movement": "Պահեստի շարժ",
   "order.created": "Պատվեր ստեղծվեց",
   "order.updated": "Պատվեր փոփոխվեց",

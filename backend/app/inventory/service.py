@@ -182,3 +182,109 @@ async def get_low_stock_materials(db: AsyncSession) -> list[Material]:
         .where(Material.low_stock_threshold > 0)
     )
     return list(result.scalars().all())
+
+
+async def force_delete_material(
+    db: AsyncSession,
+    material_id: int,
+    *,
+    admin_id: int,
+) -> dict:
+    """ADMIN ONLY. Hard-delete a Material AND its 1:1 Inventory row WITHOUT
+    touching the inventory ledger. Reserved for materials whose
+    `inventory.quantity_on_hand` is exactly zero.
+
+    The Inventory row is a counter at zero by the time we reach this path,
+    so removing it destroys no history. StockMovement rows are append-only
+    audit and are NEVER deleted by this endpoint — if any exist, we refuse
+    with a structured code so the admin sees exactly why.
+
+    Refusal codes:
+      material_quantity_not_zero    — inventory.quantity_on_hand != 0.
+      material_has_stock_movements  — at least one StockMovement row
+                                       references this material. Audit ledger
+                                       preservation wins; the row stays.
+      material_has_recipe_links     — at least one ProductMaterial or
+                                       ProductSizeMaterialRequirement row
+                                       references this material. Admin must
+                                       clear the recipe linkage first via the
+                                       existing endpoints.
+
+    Returns: {"inventory_row_deleted": True, "stock_movements_preserved": 0,
+              "recipe_links_preserved": 0} for the audit details string.
+    """
+    from app.products.models import ProductMaterial, ProductSizeMaterialRequirement
+
+    material_result = await db.execute(
+        select(Material).where(Material.id == material_id).with_for_update()
+    )
+    material = material_result.scalar_one_or_none()
+    if material is None:
+        raise NotFoundException(detail=f"Material {material_id} not found")
+
+    inv_result = await db.execute(
+        select(Inventory).where(Inventory.material_id == material_id).with_for_update()
+    )
+    inventory = inv_result.scalar_one_or_none()
+    current_qty = inventory.quantity_on_hand if inventory else Decimal("0")
+    if current_qty != 0:
+        raise ValidationException(
+            detail=(
+                f"Հնարավոր չէ ուժով ջնջել: ընթացիկ քանակը {current_qty} {material.unit}. "
+                "Քանակը պետք է լինի 0:"
+            ),
+            code="material_quantity_not_zero",
+        )
+
+    movement_count = (await db.execute(
+        select(func.count()).select_from(StockMovement)
+        .where(StockMovement.material_id == material_id)
+    )).scalar() or 0
+    if movement_count > 0:
+        raise ValidationException(
+            detail=(
+                f"Հնարավոր չէ ուժով ջնջել: կան {movement_count} պահեստի շարժ: "
+                "Պատմությունը պահպանվում է:"
+            ),
+            code="material_has_stock_movements",
+        )
+
+    pm_count = (await db.execute(
+        select(func.count()).select_from(ProductMaterial)
+        .where(ProductMaterial.material_id == material_id)
+    )).scalar() or 0
+    req_count = (await db.execute(
+        select(func.count()).select_from(ProductSizeMaterialRequirement)
+        .where(ProductSizeMaterialRequirement.material_id == material_id)
+    )).scalar() or 0
+    if pm_count + req_count > 0:
+        raise ValidationException(
+            detail=(
+                f"Հնարավոր չէ ուժով ջնջել: կապված է {pm_count + req_count} բաղադրատոմսի հետ: "
+                "Նախ հեռացրեք բաղադրատոմսի կապը:"
+            ),
+            code="material_has_recipe_links",
+        )
+
+    # All checks passed. Delete the Inventory row (counter at zero, not
+    # history) then the Material row. Both inside the same transaction.
+    inventory_row_deleted = False
+    if inventory is not None:
+        await db.delete(inventory)
+        inventory_row_deleted = True
+    await db.delete(material)
+    await db.flush()
+
+    summary = {
+        "inventory_row_deleted": inventory_row_deleted,
+        "stock_movements_preserved": 0,
+        "recipe_links_preserved": 0,
+    }
+    logger.warning(
+        "inventory.material_force_deleted",
+        material_id=material_id,
+        material_sku=material.sku,
+        admin_id=admin_id,
+        inventory_row_deleted=inventory_row_deleted,
+    )
+    return summary

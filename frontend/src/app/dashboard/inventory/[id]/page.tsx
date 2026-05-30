@@ -5,13 +5,15 @@ import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { formatDateTime, formatNumber } from "@/lib/utils";
 import Link from "next/link";
 import { EditMaterialForm, DeleteMaterialButton, AddStockMovement } from "../InventoryActions";
+import { ForceDeleteMaterialButton } from "../ForceDeleteMaterialButton";
 
 export default async function MaterialDetailPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requireModule("inventory");
+  const session = await requireModule("inventory");
+  const isAdmin = session.role === "admin";
   const { id } = await params;
 
   const [material, movements] = await Promise.all([
@@ -29,9 +31,15 @@ export default async function MaterialDetailPage({
 
       <div className="flex items-center justify-between mt-1 mb-6">
         <h1 className="text-2xl font-bold text-gray-900">{material.name}</h1>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
           <EditMaterialForm material={material} />
           <DeleteMaterialButton materialId={material.id} materialName={material.name} />
+          {isAdmin && (material.inventory?.quantity_on_hand ?? 0) === 0 && (
+            <ForceDeleteMaterialButton
+              materialId={material.id}
+              materialName={material.name}
+            />
+          )}
         </div>
       </div>
 

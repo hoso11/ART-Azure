@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import require_roles, INVENTORY_MANAGER, PRODUCTION_INVENTORY_READ
 from app.inventory import service, schemas
-from app.users.models import User
+from app.users.models import User, UserRole
 from app.activity import service as activity_service
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
@@ -112,6 +112,43 @@ async def delete_material(
         action="material.deleted", entity_type="material", entity_id=material_id,
         old_values=snapshot,
         details=f"Deleted {snapshot['name']}",
+    )
+
+
+@router.delete("/materials/{material_id}/force", status_code=204)
+async def force_delete_material(
+    material_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_roles(UserRole.admin)),
+):
+    """ADMIN ONLY. Force-delete a Material whose inventory is at zero.
+
+    DANGEROUS:
+      * Removes the Material row and its 1:1 Inventory row.
+      * Inventory ledger (`stock_movements`) is NOT modified — refused if
+        any movement references this material.
+      * Recipe linkages must be cleared first — refused if any exist.
+
+    Refusal codes:
+      - material_quantity_not_zero   (422) inventory.quantity_on_hand != 0
+      - material_has_stock_movements (422) any StockMovement references this
+      - material_has_recipe_links    (422) any ProductMaterial /
+        ProductSizeMaterialRequirement references this
+    """
+    existing = await service.get_material_by_id(db, material_id)
+    snapshot = _material_snapshot(existing)
+    summary = await service.force_delete_material(db, material_id, admin_id=admin.id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="inventory.material_force_deleted",
+        entity_type="material",
+        entity_id=material_id,
+        old_values=snapshot,
+        details=(
+            "Force deleted material with zero stock. "
+            "Inventory ledger preserved."
+        ),
     )
 
 
