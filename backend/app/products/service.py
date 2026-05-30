@@ -212,12 +212,64 @@ async def update_variant(db: AsyncSession, variant_id: int, admin_user_id: int =
 
 
 async def delete_variant(db: AsyncSession, variant_id: int) -> None:
+    """Delete a ProductVariant.
+
+    Pre-flight checks the two FK referrers that block the underlying SQL
+    DELETE and surface as opaque IntegrityError → uncaught 500 today:
+
+      * order_items.product_variant_id  → 409 variant_has_orders
+      * production_batches.variant_id   → 409 variant_has_production_batches
+
+    Both checks return a typed ConflictException with a `details` payload
+    that includes the row count, so the frontend can render a real reason
+    instead of the silent failure path documented in the v40 handoff.
+
+    A defensive `IntegrityError` catch wraps the actual delete so that any
+    future FK referrer also produces a structured 409 instead of a 500.
+    """
+    from sqlalchemy.exc import IntegrityError
+    from app.orders.models import OrderItem
+    from app.production.models import ProductionBatch
+
     result = await db.execute(select(ProductVariant).where(ProductVariant.id == variant_id))
     variant = result.scalar_one_or_none()
     if not variant:
         raise NotFoundException(detail=f"Variant {variant_id} not found")
+
+    order_item_count = (await db.execute(
+        select(func.count()).select_from(OrderItem)
+        .where(OrderItem.product_variant_id == variant_id)
+    )).scalar() or 0
+    if order_item_count > 0:
+        raise ConflictException(
+            detail=(
+                f"Հնարավոր չէ ջնջել. տարբերակը կապված է {order_item_count} պատվերի տողի հետ:"
+            ),
+            code="variant_has_orders",
+        )
+
+    batch_count = (await db.execute(
+        select(func.count()).select_from(ProductionBatch)
+        .where(ProductionBatch.variant_id == variant_id)
+    )).scalar() or 0
+    if batch_count > 0:
+        raise ConflictException(
+            detail=(
+                f"Հնարավոր չէ ջնջել. տարբերակը կապված է {batch_count} արտադրության հետ:"
+            ),
+            code="variant_has_production_batches",
+        )
+
     await db.delete(variant)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        # Defensive — if a future FK referrer lands without an updated
+        # pre-flight, the user sees a structured 409 instead of a 500.
+        raise ConflictException(
+            detail="Հնարավոր չէ ջնջել. տարբերակը կապակցված է այլ գրառումների հետ:",
+            code="variant_in_use",
+        )
 
 
 # ── Images ──────────────────────────────────────────────

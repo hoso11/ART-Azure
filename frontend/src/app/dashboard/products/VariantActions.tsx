@@ -6,6 +6,17 @@ import { ProductVariant, Material, ProductSizeMaterialRequirement } from "@/type
 import { Button } from "@/components/ui/Button";
 import { FormField, Input } from "@/components/ui/FormField";
 import { formatCurrency, formatNumber } from "@/lib/utils";
+import { showToast } from "@/lib/toast";
+
+const VARIANT_DELETE_ERRORS: Record<string, string> = {
+  variant_has_orders: "Հնարավոր չէ ջնջել. տարբերակը կապված է պատվերների հետ:",
+  variant_has_production_batches:
+    "Հնարավոր չէ ջնջել. տարբերակը կապված է արտադրության հետ:",
+  variant_in_use:
+    "Հնարավոր չէ ջնջել. տարբերակը կապակցված է այլ գրառումների հետ:",
+  insufficient_permissions: "Չունեք իրավասություն ջնջելու տարբերակը:",
+  not_found: "Տարբերակը արդեն ջնջված է:",
+};
 
 // ── Variant form (add / edit) ─────────────────────────
 
@@ -377,12 +388,24 @@ export function VariantManager({ productId, variants }: { productId: number; var
         method: "DELETE",
         credentials: "include",
       });
-      if (res.ok || res.status === 204) {
+      if (res.status === 204 || res.ok) {
         setDeleteId(null);
+        showToast("Տարբերակը ջնջվեց", "success");
         router.refresh();
+        return;
       }
+      const data = await res.json().catch(() => ({}));
+      const code = (data?.code as string) || "";
+      const msg =
+        VARIANT_DELETE_ERRORS[code] ||
+        (data?.detail as string) ||
+        "Չհաջողվեց ջնջել տարբերակը";
+      showToast(msg, "error");
+      // Reset the inline Confirm/Cancel UI so the row stops looking stuck.
+      setDeleteId(null);
     } catch {
-      // ignore
+      showToast("Կապի սխալ. չհաջողվեց ջնջել տարբերակը", "error");
+      setDeleteId(null);
     } finally {
       setDeleting(false);
     }

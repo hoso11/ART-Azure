@@ -268,3 +268,121 @@ async def test_simple_user_cannot_upload_image(
         cookies=user_cookies,
     )
     assert resp.status_code == 403
+
+
+# ── DELETE /products/variants/{id} — structured FK errors ───────────────────
+
+
+async def _make_product_with_variant(client, admin_cookies, *, sku, stock=0):
+    resp = await client.post("/api/v1/products", json={
+        "name": f"VarDel {sku}",
+        "sku": sku,
+        "variants": [{"size": "M", "color": "Slate", "price": 10.00, "stock_quantity": stock}],
+    }, cookies=admin_cookies)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    return body["id"], body["variants"][0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_delete_variant_no_references_succeeds(
+    client: AsyncClient, admin_user, admin_cookies,
+):
+    """Fresh variant with no order_items or production_batches → 204."""
+    _, variant_id = await _make_product_with_variant(client, admin_cookies, sku="VAR-DEL-OK-001")
+    resp = await client.delete(
+        f"/api/v1/products/variants/{variant_id}", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204, resp.text
+
+
+@pytest.mark.asyncio
+async def test_delete_variant_blocked_by_order_items(
+    client: AsyncClient, admin_user, customer, admin_cookies,
+):
+    """Variant referenced by order_items → 409 variant_has_orders, not 500."""
+    _, variant_id = await _make_product_with_variant(
+        client, admin_cookies, sku="VAR-DEL-ORD-001", stock=10,
+    )
+    order_resp = await client.post("/api/v1/orders", json={
+        "customer_id": customer.id,
+        "items": [{"product_variant_id": variant_id, "quantity": 2, "unit_price": 10.00}],
+    }, cookies=admin_cookies)
+    assert order_resp.status_code == 201
+
+    resp = await client.delete(
+        f"/api/v1/products/variants/{variant_id}", cookies=admin_cookies,
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == "variant_has_orders"
+    assert "1" in body["detail"]  # row count surfaces in the Armenian detail string
+
+
+@pytest.mark.asyncio
+async def test_delete_variant_blocked_by_production_batches(
+    client: AsyncClient, admin_user, admin_cookies,
+):
+    """Variant referenced by a production_batch → 409 variant_has_production_batches."""
+    from decimal import Decimal as _D
+    product_id, variant_id = await _make_product_with_variant(
+        client, admin_cookies, sku="VAR-DEL-BAT-001",
+    )
+    # Need a material + size-requirement to create a batch.
+    mat_resp = await client.post("/api/v1/inventory/materials", json={
+        "name": "Var-batch mat", "sku": "MAT-VAR-BAT-001", "unit": "m",
+        "quantity_on_hand": 50, "low_stock_threshold": 0,
+    }, cookies=admin_cookies)
+    mat_id = mat_resp.json()["id"]
+    await client.post(
+        f"/api/v1/products/{product_id}/size-requirements",
+        json={"material_id": mat_id, "size": "M", "quantity_per_item": 1},
+        cookies=admin_cookies,
+    )
+    batch_resp = await client.post("/api/v1/production/batches", json={
+        "product_id": product_id, "variant_id": variant_id, "quantity_to_produce": 5,
+    }, cookies=admin_cookies)
+    assert batch_resp.status_code == 201, batch_resp.text
+
+    resp = await client.delete(
+        f"/api/v1/products/variants/{variant_id}", cookies=admin_cookies,
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == "variant_has_production_batches"
+
+
+@pytest.mark.asyncio
+async def test_delete_variant_blocked_leaves_variant_intact(
+    client: AsyncClient, admin_user, customer, admin_cookies,
+):
+    """A refused delete must not partially mutate state."""
+    product_id, variant_id = await _make_product_with_variant(
+        client, admin_cookies, sku="VAR-DEL-INT-001", stock=5,
+    )
+    await client.post("/api/v1/orders", json={
+        "customer_id": customer.id,
+        "items": [{"product_variant_id": variant_id, "quantity": 1, "unit_price": 10.00}],
+    }, cookies=admin_cookies)
+
+    resp = await client.delete(
+        f"/api/v1/products/variants/{variant_id}", cookies=admin_cookies,
+    )
+    assert resp.status_code == 409
+
+    # Variant still reachable on its parent product.
+    get_resp = await client.get(f"/api/v1/products/{product_id}", cookies=admin_cookies)
+    assert get_resp.status_code == 200
+    variant_ids = [v["id"] for v in get_resp.json()["variants"]]
+    assert variant_id in variant_ids
+
+
+@pytest.mark.asyncio
+async def test_delete_variant_not_found_returns_404(
+    client: AsyncClient, admin_user, admin_cookies,
+):
+    resp = await client.delete(
+        "/api/v1/products/variants/999999", cookies=admin_cookies,
+    )
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "not_found"
