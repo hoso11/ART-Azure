@@ -6,6 +6,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { formatDate } from "@/lib/utils";
 import Link from "next/link";
 import { CreateProductButton } from "./ProductActions";
+import { ForceDeleteProductButton } from "./ForceDeleteProductButton";
 
 export default async function ProductsPage({
   searchParams,
@@ -59,9 +60,17 @@ export default async function ProductsPage({
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-600">{formatDate(product.created_at)}</td>
                     <td className="px-6 py-4 text-right">
-                      <Link href={`/dashboard/products/${product.id}`} className="text-brand-700 hover:underline text-sm">
-                        View
-                      </Link>
+                      <div className="flex items-center justify-end gap-3 whitespace-nowrap">
+                        <Link href={`/dashboard/products/${product.id}`} className="text-brand-700 hover:underline text-sm">
+                          View
+                        </Link>
+                        {isAdmin && product.variants.length === 0 && (
+                          <ForceDeleteProductButton
+                            productId={product.id}
+                            productName={product.name}
+                          />
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}

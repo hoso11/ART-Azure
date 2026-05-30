@@ -386,3 +386,240 @@ async def test_delete_variant_not_found_returns_404(
     )
     assert resp.status_code == 404
     assert resp.json()["code"] == "not_found"
+
+
+# ── DELETE /products/{id}/force — admin force-delete ────────────────────────
+
+
+async def _delete_all_variants(client, admin_cookies, product_id):
+    """Strip a product down to zero variants by hard-deleting each in turn.
+    Required because the create flow always seeds at least one variant."""
+    p = (await client.get(f"/api/v1/products/{product_id}", cookies=admin_cookies)).json()
+    for v in p.get("variants", []):
+        resp = await client.delete(
+            f"/api/v1/products/variants/{v['id']}", cookies=admin_cookies,
+        )
+        assert resp.status_code == 204, resp.text
+
+
+async def _force_delete_make_helper_user(db_session, role):
+    from app.users.models import User
+    from app.users.service import hash_password
+    u = User(
+        email=f"{role.value}@productforce.test.com",
+        hashed_password=hash_password("Passw0rd!"),
+        role=role,
+    )
+    db_session.add(u)
+    await db_session.commit()
+    await db_session.refresh(u)
+    return u
+
+
+def _force_delete_cookies_for(user):
+    from app.auth.service import create_access_token
+    return {"access_token": create_access_token(user.id, user.role.value)}
+
+
+@pytest.mark.asyncio
+async def test_force_delete_product_zero_variants_succeeds(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage, db_session,
+):
+    """Product with zero variants, plus some metadata children → force OK.
+    All four child tables are cleared via ORM cascade."""
+    from app.products.models import (
+        Product, ProductImage, ProductMaterial, ProductSizeMaterialRequirement,
+    )
+    from sqlalchemy import select as _sel
+
+    product_id = await _create_product(client, admin_cookies, "FORCE-PROD-001")
+    # Add an image, a recipe row, a size requirement.
+    img_resp = await client.post(
+        f"/api/v1/products/{product_id}/images",
+        files={"file": ("a.png", PNG_BYTES, "image/png")},
+        cookies=admin_cookies,
+    )
+    assert img_resp.status_code == 201, img_resp.text
+    mat_resp = await client.post("/api/v1/inventory/materials", json={
+        "name": "Force mat", "sku": "MAT-FORCE-PROD-001", "unit": "m",
+        "quantity_on_hand": 10, "low_stock_threshold": 0,
+    }, cookies=admin_cookies)
+    mat_id = mat_resp.json()["id"]
+    await client.post(
+        f"/api/v1/products/{product_id}/size-requirements",
+        json={"material_id": mat_id, "size": "M", "quantity_per_item": 1},
+        cookies=admin_cookies,
+    )
+
+    # Strip variants so the gate passes.
+    await _delete_all_variants(client, admin_cookies, product_id)
+
+    resp = await client.delete(
+        f"/api/v1/products/{product_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204, resp.text
+
+    # Product row gone.
+    assert (await db_session.execute(
+        _sel(Product).where(Product.id == product_id)
+    )).scalar_one_or_none() is None
+
+    # All metadata children cascade-removed.
+    assert (await db_session.execute(
+        _sel(ProductImage).where(ProductImage.product_id == product_id)
+    )).scalars().all() == []
+    assert (await db_session.execute(
+        _sel(ProductSizeMaterialRequirement).where(
+            ProductSizeMaterialRequirement.product_id == product_id
+        )
+    )).scalars().all() == []
+    assert (await db_session.execute(
+        _sel(ProductMaterial).where(ProductMaterial.product_id == product_id)
+    )).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_force_delete_product_with_variants_refused(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage,
+):
+    """Product with at least one variant → 422 product_has_variants."""
+    product_id = await _create_product(client, admin_cookies, "FORCE-PROD-VAR")
+    # The _create_product helper does not auto-seed variants; add one explicitly.
+    v_resp = await client.post(
+        f"/api/v1/products/{product_id}/variants",
+        json={"size": "M", "color": "Red", "price": 5.00},
+        cookies=admin_cookies,
+    )
+    assert v_resp.status_code == 201, v_resp.text
+
+    resp = await client.delete(
+        f"/api/v1/products/{product_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "product_has_variants"
+
+
+@pytest.mark.asyncio
+async def test_force_delete_product_with_production_batches_refused(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage, db_session,
+):
+    """Defensive check: if a ProductionBatch row references this product
+    despite the variants gate (the FK from batches.variant_id forces a
+    valid variant somewhere, so we borrow one from a second product), the
+    force-delete must refuse with product_has_production_batches."""
+    from app.products.models import Product, ProductVariant
+    from app.production.models import ProductionBatch
+    from sqlalchemy import select as _sel
+
+    # Product A: has zero variants (our target).
+    target_id = await _create_product(client, admin_cookies, "FORCE-PROD-BATCH-A")
+    # Product B: lends a valid variant_id to satisfy the batch FK.
+    helper_id = await _create_product(client, admin_cookies, "FORCE-PROD-BATCH-B")
+    v_resp = await client.post(
+        f"/api/v1/products/{helper_id}/variants",
+        json={"size": "M", "color": "Black", "price": 5.00},
+        cookies=admin_cookies,
+    )
+    assert v_resp.status_code == 201, v_resp.text
+    helper_variant_id = v_resp.json()["id"]
+
+    # Insert a batch whose product_id points at the target but whose
+    # variant_id points at the helper's variant — satisfies both FK
+    # constraints while leaving the target's variant count at zero.
+    batch = ProductionBatch(
+        product_id=target_id,
+        variant_id=helper_variant_id,
+        quantity_to_produce=1,
+        production_type="stock_based",
+        current_stage="cutting",
+        stage_status="completed",
+        materials_deducted=True,
+        stock_added=True,
+        good_quantity=1,
+        damaged_quantity=0,
+        created_by=admin_user.id,
+    )
+    db_session.add(batch)
+    await db_session.commit()
+
+    # First gate passes (target has 0 variants), second gate fires.
+    resp = await client.delete(
+        f"/api/v1/products/{target_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "product_has_production_batches"
+
+    # Target product row untouched.
+    assert (await db_session.execute(
+        _sel(Product).where(Product.id == target_id)
+    )).scalar_one_or_none() is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "role_name",
+    ["director", "production_manager", "warehouse_manager", "simple_user"],
+)
+async def test_force_delete_product_non_admin_forbidden(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage, db_session, role_name,
+):
+    from app.users.models import UserRole as _UR
+    product_id = await _create_product(client, admin_cookies, f"FORCE-PROD-RBAC-{role_name[:5]}")
+    await _delete_all_variants(client, admin_cookies, product_id)
+
+    actor = await _force_delete_make_helper_user(db_session, _UR(role_name))
+    actor_cookies = _force_delete_cookies_for(actor)
+    resp = await client.delete(
+        f"/api/v1/products/{product_id}/force", cookies=actor_cookies,
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "insufficient_permissions"
+
+
+@pytest.mark.asyncio
+async def test_force_delete_product_writes_audit_row(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage, db_session,
+):
+    from app.activity.models import ActivityLog
+    from sqlalchemy import func as _func, select as _sel
+
+    product_id = await _create_product(client, admin_cookies, "FORCE-PROD-AUDIT")
+    await _delete_all_variants(client, admin_cookies, product_id)
+
+    before = (await db_session.execute(
+        _sel(_func.count()).select_from(ActivityLog)
+        .where(ActivityLog.action == "product.force_deleted")
+    )).scalar() or 0
+    resp = await client.delete(
+        f"/api/v1/products/{product_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204
+    rows = (await db_session.execute(
+        _sel(ActivityLog).where(ActivityLog.action == "product.force_deleted")
+    )).scalars().all()
+    assert len(rows) - before == 1
+    row = rows[-1]
+    assert row.entity_type == "product"
+    assert row.entity_id == product_id
+    assert row.details and "Force deleted product" in row.details
+
+
+@pytest.mark.asyncio
+async def test_normal_product_delete_still_soft_deletes(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage, db_session,
+):
+    """Regression: existing DELETE /products/{id} keeps soft-delete semantics
+    (sets is_active=False, row remains in the DB)."""
+    from app.products.models import Product
+    from sqlalchemy import select as _sel
+    product_id = await _create_product(client, admin_cookies, "NORM-PROD-REG")
+    resp = await client.delete(
+        f"/api/v1/products/{product_id}", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204
+    # Row still present, just marked inactive.
+    p = (await db_session.execute(
+        _sel(Product).where(Product.id == product_id)
+    )).scalar_one_or_none()
+    assert p is not None
+    assert p.is_active is False

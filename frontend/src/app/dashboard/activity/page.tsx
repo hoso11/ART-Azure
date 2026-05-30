@@ -23,6 +23,7 @@ const ACTION_LABELS: Record<string, string> = {
   "product.created": "Ապրանք ստեղծվեց",
   "product.updated": "Ապրանք փոփոխվեց",
   "product.deleted": "Ապրանք ջնջվեց",
+  "product.force_deleted": "Ապրանքը ուժով ջնջվեց (անդարձելի)",
   "variant.created": "Տարբերակ ստեղծվեց",
   "variant.updated": "Տարբերակ փոփոխվեց",
   "variant.deleted": "Տարբերակ ջնջվեց",

@@ -19,6 +19,7 @@ from app.products.schemas import CategoryCreate, CategoryUpdate, CategoryRespons
 from app.storage.interface import get_storage_service, StorageService
 from app.users.models import User, UserRole
 from app.activity import service as activity_service
+from loguru import logger
 
 
 def _product_snapshot(p) -> dict:
@@ -259,6 +260,62 @@ async def delete_product(
         old_values=snapshot,
         details=f"Deleted {snapshot['name']} ({snapshot['sku']})",
     )
+
+
+@router.delete("/{product_id}/force", status_code=204)
+async def force_delete_product(
+    product_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_roles(UserRole.admin)),
+    storage: StorageService = Depends(get_storage_service),
+):
+    """ADMIN ONLY. Hard-delete a Product (and cascade its metadata children)
+    when it has zero variants and zero production_batches.
+
+    DANGEROUS:
+      * Hard-deletes the product row.
+      * Cascades product_images, product_materials, and
+        product_size_material_requirements via ORM cascade.
+      * Image blobs are removed from storage on a best-effort basis after
+        the DB delete commits — blob failures are logged but never raised.
+
+    Refused with structured error code when:
+      - product_has_variants          (422) any ProductVariant exists
+      - product_has_production_batches (422) any ProductionBatch references
+        this product directly (defensive; should be impossible with variants=0)
+    """
+    existing = await service.get_product_by_id(db, product_id)
+    snapshot = _product_snapshot(existing)
+    summary = await service.force_delete_product(db, product_id, admin_id=admin.id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="product.force_deleted",
+        entity_type="product",
+        entity_id=product_id,
+        old_values=snapshot,
+        details=(
+            "Force deleted product (zero variants). "
+            f"Cascade-removed {summary['images_removed']} image(s), "
+            f"{summary['materials_removed']} material recipe row(s), "
+            f"{summary['size_reqs_removed']} size requirement(s)."
+        ),
+    )
+    # Best-effort blob cleanup. Failures here MUST NOT roll back the
+    # already-committed DB delete; the leftover orphan blobs are harmless
+    # storage and can be cleaned up by an admin via the storage console.
+    for key in summary.get("storage_keys", []):
+        try:
+            # Same bucket as the existing single-image delete endpoint
+            # (see DELETE /products/images/{id} handler).
+            await storage.delete_file("art-images", key)
+        except Exception as exc:
+            logger.warning(
+                "product.force_deleted.blob_cleanup_failed",
+                product_id=product_id,
+                storage_key=key,
+                error=str(exc),
+            )
 
 
 # ── Variants ────────────────────────────────────────────

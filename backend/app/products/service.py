@@ -2,6 +2,7 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
+from loguru import logger
 
 from app.products.models import (
     Product, ProductVariant, ProductCategory, ProductImage,
@@ -409,3 +410,104 @@ async def delete_product_size_requirement(db: AsyncSession, req_id: int) -> None
         raise NotFoundException(detail=f"Requirement {req_id} not found")
     await db.delete(req)
     await db.flush()
+
+
+# ── Force delete ────────────────────────────────────────
+
+
+async def force_delete_product(
+    db: AsyncSession,
+    product_id: int,
+    *,
+    admin_id: int,
+) -> dict:
+    """ADMIN ONLY. Hard-delete a Product and cascade-clean its metadata
+    children (images, materials, size_material_requirements) via the
+    existing ORM relationship cascades. Reserved for products that have
+    NO variants (and therefore no production_batches by construction).
+
+    Refusal codes:
+      product_has_variants          — at least one ProductVariant row exists.
+                                       Customer's stated gate.
+      product_has_production_batches — defensive: at least one ProductionBatch
+                                       references this product directly. Should
+                                       be impossible if variants=0 (batch.variant_id
+                                       is NOT NULL) but checked to keep the FK
+                                       graph honest under any future code paths.
+
+    Side effects on success:
+      * product_images, product_materials, product_size_material_requirements
+        rows are all removed by the ORM cascade fired by db.delete(product).
+      * Image blob storage_keys are returned to the caller for best-effort
+        cleanup by the router (failures there are logged, not raised — the
+        DB delete already committed).
+      * `products.category_id` is part of the deleted row; the parent
+        ProductCategory is untouched.
+
+    Returns: {storage_keys, images_removed, materials_removed,
+              size_reqs_removed} for the audit details string.
+    """
+    product_result = await db.execute(
+        select(Product)
+        .options(
+            selectinload(Product.variants),
+            selectinload(Product.images),
+            selectinload(Product.materials),
+            selectinload(Product.size_material_requirements),
+        )
+        .where(Product.id == product_id)
+        .with_for_update()
+    )
+    product = product_result.scalar_one_or_none()
+    if product is None:
+        raise NotFoundException(detail=f"Product {product_id} not found")
+
+    variant_count = len(product.variants)
+    if variant_count > 0:
+        raise ValidationException(
+            detail=(
+                f"Հնարավոր չէ ուժով ջնջել: ապրանքն ունի {variant_count} տարբերակ: "
+                "Նախ ջնջեք տարբերակները:"
+            ),
+            code="product_has_variants",
+        )
+
+    # Defensive: batches.variant_id is NOT NULL so variants=0 implies
+    # batches=0 in normal operation, but we check to be safe under any
+    # future code path that might insert a batch with a different shape.
+    from app.production.models import ProductionBatch
+    batch_count = (await db.execute(
+        select(func.count()).select_from(ProductionBatch)
+        .where(ProductionBatch.product_id == product_id)
+    )).scalar() or 0
+    if batch_count > 0:
+        raise ValidationException(
+            detail=(
+                f"Հնարավոր չէ ուժով ջնջել: ապրանքն ունի {batch_count} արտադրություն:"
+            ),
+            code="product_has_production_batches",
+        )
+
+    storage_keys = [img.storage_key for img in product.images if img.storage_key]
+    summary = {
+        "storage_keys": storage_keys,
+        "images_removed": len(product.images),
+        "materials_removed": len(product.materials),
+        "size_reqs_removed": len(product.size_material_requirements),
+    }
+
+    # ORM cascade on Product.{images,materials,size_material_requirements,variants}
+    # ("all, delete-orphan") removes every child row in lockstep.
+    await db.delete(product)
+    await db.flush()
+
+    logger.info(
+        "product.force_deleted",
+        product_id=product_id,
+        admin_id=admin_id,
+        images_removed=summary["images_removed"],
+        materials_removed=summary["materials_removed"],
+        size_reqs_removed=summary["size_reqs_removed"],
+        storage_keys_to_cleanup=len(storage_keys),
+    )
+    return summary
