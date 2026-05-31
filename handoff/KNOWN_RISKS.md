@@ -249,3 +249,53 @@ Three files contain secrets that the deployment depends on. All three are gitign
 - **Future hardening:** remove the `storage_account_connection_string` output from `terraform/envs/dev/outputs.tf` once nothing in the workflow needs it. Currently kept for break-glass debugging.
 - **Future hardening:** move Terraform state to a remote backend (Azure Storage with blob lease lock) — gives encryption at rest, audit trail, and per-user RBAC instead of the current "anyone with the file has all the secrets" mode.
 
+
+## 16. `dump_client` firewall rule destroy is blocked by the PostgreSQL `CanNotDelete` lock
+
+What this is: `terraform/envs/dev/main.tf` declares the `azurerm_postgresql_flexible_server_firewall_rule.dump_client` IP allowlist behind `count = length(var.dump_client_allowed_ips) > 0 ? 1 : 0`. The tfvars currently sets the list to empty (or the IP that was once whitelisted has been removed), so `terraform plan` shows the rule as **destroyed** every apply.
+
+But `azurerm_management_lock.postgres_no_delete` (Critical Data Protection layer 2) is scoped to the PostgreSQL Flexible Server and the `CanNotDelete` lock inherits to child resources. Deleting the firewall rule is a delete operation on a child of the locked server, so Azure returns:
+
+```
+Error: deleting "Firewall Rule": performing Delete: unexpected status 409 (409 Conflict)
+ScopeLocked: The scope '…/firewallRules/DumpClient' cannot perform delete operation
+  because following scope(s) are locked: '…/flexibleServers/psql-art-dev-art4242'.
+  Please remove the lock and try again.
+```
+
+Every `terraform apply` since the rule went into the destroy queue has succeeded for the image-tag bumps and then failed on the firewall rule. **The image bumps still land** because they run before the failing destroy — the apply exits non-zero but the Web App resources are already modified.
+
+This is an Azure operational follow-up, not a deployment blocker.
+
+**Rules:**
+
+- Do not treat the 409 ScopeLocked as a failure of the v47+ image bumps — verify `terraform output deployed_image` / `backend_image` after every apply; the bumps are independent of the firewall rule outcome.
+- **Three options to clear** (any future session should pick one with explicit user approval):
+  1. **Restore the rule** — put the IP back in `var.dump_client_allowed_ips` so `count` returns to 1 and the destroy disappears from the plan.
+  2. **Lift the lock temporarily** — comment out `azurerm_management_lock.postgres_no_delete`, apply (rule deletes), then re-add the lock and apply again. **Two user approvals required**, one per lock-touching apply, per the Critical Data Protection rules. Both apply steps must be scanned with the protected-resource grep.
+  3. **Leave it** — every future plan will continue to show the same dangling destroy. Cosmetic only.
+
+- Never remove the lock without explicit user approval naming the lock — see `KNOWN_RISKS.md` #10 and `SAFE_TASK_RULES.md` "Critical Data Protection".
+
+## 17. Backend test infrastructure relies on a local MinIO sidecar — **local-only**
+
+What this is: The backend test suite touches the storage abstraction in several places (`GET /products/{id}` populates image URLs via the storage adapter, which calls `bucket_exists()` at construction). When tests run **without the `docker-compose` MinIO sidecar** — e.g. `docker-compose run --rm --no-deps backend pytest …` — the storage adapter raises `urllib3.exceptions.MaxRetryError: NameResolutionError("HTTPConnection(host='minio', port=9000)")` and the affected tests fail.
+
+The currently failing tests under `--no-deps` are:
+- `tests/test_products.py::test_list_products`
+- `tests/test_products.py::test_update_product`
+- `tests/test_products.py::test_delete_variant_blocked_leaves_variant_intact`
+- ~16 tests in `tests/test_production_batches.py` whose helpers call `GET /products/{id}` via `_variant_stock` / `_variant_damaged_stock`.
+
+**This is a LOCAL TEST INFRASTRUCTURE issue. Azure production is unaffected:**
+
+- The deployed Azure runtime uses **Azure Storage Account** (`startdevimgsart4242`) with the Managed Identity adapter from `backend/app/storage/azure_adapter.py` — NEVER MinIO. `terraform/envs/dev/main.tf` sets `STORAGE_BACKEND=azure` and the MinIO sidecar (`minio_sidecar_enabled`) is `false` in Azure.
+- The deployed backend `/api/v1/products/public?limit=1` returns HTTP 200 with no storage errors — verified on every v37–v48 deploy.
+- These tests pass when run against the full `docker-compose up` stack (MinIO reachable). They fail only in the partial `--no-deps` configuration used for one-off quick test runs.
+
+**Rules:**
+
+- Do not document these failures as production bugs. They are an artifact of how the test runner is invoked.
+- When running backend tests locally, prefer `make test` (uses the full `docker-compose` stack) over `docker-compose run --rm --no-deps backend pytest …` if you need the storage-touching paths to pass.
+- A future test-hygiene pass can stub `get_storage_service` on these tests via the existing `fake_storage` fixture (test_products.py defines it for the tests that already use it). That is a follow-up — not a blocker.
+- Never react to a `MaxRetryError("HTTPConnectionPool(host='minio', …)")` in test output by modifying Azure infrastructure, the storage abstraction, or the `Dockerfile.azure` image. The fix is at the test-runner level only.

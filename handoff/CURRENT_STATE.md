@@ -7,9 +7,9 @@ Snapshot as of the most recent verified working tree on `v12`. Future agents: co
 | Component | State | Live value |
 |---|---|---|
 | Resource group | applied | `rg-art-dev` (West Europe) |
-| Frontend Web App | applied, serving | `app-art-frontend-dev-art4242` on `asp-art-dev` (F1 Free) — image `hoso30/art-frontend:v33` |
-| Backend Web App | applied, serving | `app-art-backend-dev-art4242` on `asp-art-backend-dev` (F1 Free) — image `hoso30/art-backend:v36`. **System-Assigned identity** (Task C2a) — principal_id `8b108e0c-10af-4d3d-9a34-5f372f684064`. |
-| Backend `worker` sidecar | applied | image `hoso30/art-backend:v36`, running Celery worker + beat |
+| Frontend Web App | applied, serving | `app-art-frontend-dev-art4242` on `asp-art-dev` (F1 Free) — image `hoso30/art-frontend:v46` (v49 localization cleanup) |
+| Backend Web App | applied, serving | `app-art-backend-dev-art4242` on `asp-art-backend-dev` (F1 Free) — image `hoso30/art-backend:v48` (v48 Category force-delete). **System-Assigned identity** (Task C2a) — principal_id `8b108e0c-10af-4d3d-9a34-5f372f684064`. |
+| Backend `worker` sidecar | applied | image `hoso30/art-backend:v48`, running Celery worker + beat |
 | Backend `redis` sidecar | applied | `redis:7-alpine`, internal-only |
 | Backend `minio` sidecar | disabled | `minio_sidecar_enabled = false` since Phase 4. Sitecontainer resource still exists in `main.tf` for parity. **Never enable in Azure** — MinIO is local-dev-only. |
 | PostgreSQL Flexible Server | applied, serving | `psql-art-dev-art4242` (B_Standard_B1ms, PG 16, 32 GB, 7-day backup, **North Europe** — see PostgreSQL exception in CLAUDE.md). **Two roles in use** (Task C1): `art_admin` for Alembic + bootstrap, `art_app` (least-privilege CRUD only) for application runtime. |
@@ -27,8 +27,8 @@ Verify image tags after any apply:
 cd terraform/envs/dev
 source .env.terraform
 terraform output | grep -E "deployed_image|backend_image"
-# deployed_image = "hoso30/art-frontend:v33"
-# backend_image  = "hoso30/art-backend:v36"
+# deployed_image = "hoso30/art-frontend:v46"
+# backend_image  = "hoso30/art-backend:v48"
 ```
 
 Verify the live security stack:
@@ -69,7 +69,7 @@ All three are gitignored. Never echo their contents into chat/commits/logs. The 
 
 ## Alembic head
 
-- Current head: **`012_extend_user_roles`** (down-revision `011_order_stock_deducted`).
+- Current head: **`015_variant_force_delete`** (down-revision `014_stock_movement_mat_null`).
 - Migration files on disk (`backend/alembic/versions/`):
   - `001_initial`
   - `002_var_mat_req`
@@ -81,6 +81,9 @@ All three are gitignored. Never echo their contents into chat/commits/logs. The 
   - `010_batch_partial_outcome`  *(no 009 file — see `KNOWN_RISKS.md` #1)*
   - `011_order_stock_deducted`
   - `012_extend_user_roles`
+  - `013_stock_movement_batch_id`  *(FK `stock_movements.batch_id` nullable + `ON DELETE SET NULL`)*
+  - `014_stock_movement_mat_null`  *(material force-delete snapshot, see `DELETION_MODEL.md`)*
+  - `015_variant_force_delete`  *(variant force-delete snapshots on `order_items` + `production_batches`, see `DELETION_MODEL.md`)*
 - **No `009_*` migration exists. It must not be reintroduced — see `KNOWN_RISKS.md` #1.**
 - Verify: `ls backend/alembic/versions/` and `docker-compose exec backend alembic current`.
 
@@ -116,7 +119,8 @@ The boot script reads `alembic_version.version_num` and rewrites it to `006_orde
  004_order_materials_deducted, 006_order_item_fulfillment,
  007_production_batches, 008_activity_log_columns,
  010_batch_partial_outcome, 011_order_stock_deducted,
- 012_extend_user_roles}
+ 012_extend_user_roles, 013_stock_movement_batch_id,
+ 014_stock_movement_mat_null, 015_variant_force_delete}
 ```
 
 Designed to recover databases stamped at a now-deleted revision (e.g. `005_production_records` or a transient `009_*`). The rewrite is silent — see `KNOWN_RISKS.md` for the caveat.
@@ -274,6 +278,39 @@ UI surfaces:
 - **Reports / Հաշվետվություններ** (`/dashboard/reports`): new report type `Խոտանի հաշվետվություն` with three summary cards (`Ընդհանուր խոտան`, `Ապրանքների քանակ`, `Տարբերակների քանակ`) and a per-variant table. JSON + CSV export. Backed by `GET /reports/damaged-stock`.
 
 Order-based production damaged tracking is **NOT implemented** — it is Phase 2 and remains explicitly off the roadmap until the open product question is answered. See `NEXT_TASKS.md`.
+
+## Admin Override / Force Delete framework — load-bearing (deployed backend v48 / frontend v46)
+
+Every admin-facing delete refusal in the system has a typed `FORCE DELETE` escape with the same snapshot + FK-NULL pattern, audit row, and red-tinted activity log treatment. **No admin workflow can end at a generic "Cannot delete because referenced" without a path forward.** See the full per-entity spec in [`DELETION_MODEL.md`](DELETION_MODEL.md).
+
+Force-delete endpoints today:
+
+| Entity | Endpoint | Migration | Gate | Audit action |
+|---|---|---|---|---|
+| Material | `DELETE /api/v1/inventory/materials/{id}/force` | `014_stock_movement_mat_null` | `quantity_on_hand == 0` | `inventory.material_force_deleted` |
+| Product | `DELETE /api/v1/products/{id}/force` | (no schema) | zero variants AND zero batches | `product.force_deleted` |
+| Variant | `DELETE /api/v1/products/variants/{id}/force` | `015_variant_force_delete` | **no business gate** — universal admin escape | `variant.force_deleted` |
+| Production Batch | `DELETE /api/v1/production/batches/{id}/force` | (no schema — reuses `013` FK) | **no business gate** — works in pending / in_progress / completed, with or without linked movements | `production.batch_force_deleted` |
+| Order | `DELETE /api/v1/orders/{id}/force` | (no schema) | **no business gate** | `order.force_deleted` |
+| Category | `DELETE /api/v1/categories/{id}/force` | (no schema — `Product.category_id` already nullable) | **no business gate** | `category.force_deleted` |
+
+**Preservation guarantees** (load-bearing — never weaken without explicit user approval):
+
+- **Audit logs** — never deleted under any path.
+- **Stock movements** — preserved via FK→NULL + `material_name_snapshot` / `batch_id=NULL`. Material consumption report falls back to snapshot + `(ջնջված)`.
+- **Order history** — preserved. When a variant is force-deleted, every referring `order_items` row keeps `quantity`, `unit_price`, `fulfilled_from_stock`, `production_quantity`; `product_variant_id` → NULL; `variant_name_snapshot` + `product_name_snapshot` populated; order detail view renders `{name} (ջնջված)`.
+- **Production batches** — preserved when a variant is force-deleted. Good/damaged counters, stage progression, and linked stock movements survive with the same snapshot pattern.
+- **Sellable vs damaged stock counters** are never automatically reversed by force-delete. The modal warns; admin can manually adjust inventory afterward.
+- **Products** survive a category force-delete intact (`Product.category_id = NULL`); they become "uncategorized" until reassigned.
+
+**UI contract** (every Force Delete button):
+- Visible only when the actor is admin.
+- Opens a typed-confirmation modal requiring the exact string `FORCE DELETE`.
+- Modal lists: what will be deleted, what will be preserved, how many references become orphan (reference count is shown inline before the button is clicked — e.g. `Կապված է N պատվերի հետ`).
+- Activity log row gets red row tint + `Ուժով` badge — data-driven by the `*.force_deleted` action-suffix matcher in `frontend/src/app/dashboard/activity/page.tsx`, so any future force-delete entity inherits the styling.
+
+**Forward-only schema caveats:**
+- Migrations 014 and 015 made `material_id`, `product_variant_id`, `variant_id` nullable. Their `downgrade()` paths restore `NOT NULL`, which **fails if any orphan rows exist** (i.e. any force-delete has run). To roll back below v46, first backfill the FK columns from the snapshot or accept the data loss. Same forward-only caveat as `012_extend_user_roles`.
 
 ## Rolled back / removed (do not restore)
 
