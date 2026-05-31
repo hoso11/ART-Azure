@@ -386,6 +386,61 @@ async def delete_variant(
     )
 
 
+@router.delete("/variants/{variant_id}/force", status_code=204)
+async def force_delete_variant(
+    variant_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_roles(UserRole.admin)),
+):
+    """ADMIN ONLY. Force-delete a ProductVariant regardless of references.
+
+    Universal admin escape hatch for the typed-409 normal delete:
+      - variant_has_orders                — N order_items reference it
+      - variant_has_production_batches    — M production batches reference it
+
+    DANGEROUS:
+      * Hard-deletes the ProductVariant row.
+      * For every referencing OrderItem: variant_name + product_name are
+        snapshotted onto the row and product_variant_id is set to NULL.
+        Order totals, unit_price, quantity, fulfilled_from_stock, and
+        production_quantity stay intact — the order remains visible in
+        sales reports with the snapshot label.
+      * For every referencing ProductionBatch: variant_name + product_name
+        are snapshotted onto the row and variant_id is set to NULL.
+        Good/damaged counters, stage progression, stock_movements (linked
+        via batch_id), and audit history stay intact.
+      * Variant.stock_quantity and variant.damaged_stock_quantity are
+        discarded with the row; the catalog Մնացորդ for this size/color
+        disappears.
+      * Action is irreversible.
+
+    No backend gate: the typed `FORCE DELETE` UI confirmation is the only
+    barrier. Returns 404 if the variant is already gone.
+    """
+    from app.products.models import ProductVariant
+    from sqlalchemy import select as _sel
+    existing_q = await db.execute(_sel(ProductVariant).where(ProductVariant.id == variant_id))
+    existing = existing_q.scalar_one_or_none()
+    snapshot = _variant_snapshot(existing) if existing else None
+    summary = await service.force_delete_variant(db, variant_id, admin_id=admin.id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="variant.force_deleted",
+        entity_type="variant",
+        entity_id=variant_id,
+        old_values=snapshot,
+        details=(
+            f"Force deleted variant {summary['product_name']} / "
+            f"{summary['variant_name']}. "
+            f"Snapshotted {summary['order_items_orphaned']} order item(s) "
+            f"and {summary['batches_orphaned']} production batch(es); "
+            "stock_movements ledger preserved. "
+            "Historical reports may show '(ջնջված)' for this variant."
+        ),
+    )
+
+
 # ── Product Size Material Requirements ──────────────────
 # Each row: which material + which size + qty per finished item.
 # GET /products/{product_id}/size-requirements   → list all for the product

@@ -9,6 +9,7 @@ import { OrderCurrentControl } from "./OrderCurrentControl";
 import { CreateBatchButton } from "./CreateBatchButton";
 import { BatchControl } from "./BatchControl";
 import { DeleteBatchButton } from "./DeleteBatchButton";
+import { ForceDeleteBatchButton } from "./ForceDeleteBatchButton";
 
 const STAGE_LABELS: Record<string, string> = {
   cutting: "Կտրում",
@@ -150,10 +151,15 @@ export default async function ProductionPage({
               {batches?.items.map((b) => (
                 <tr key={b.id} className="hover:bg-gray-50">
                   <td className="px-6 py-4 text-sm font-medium text-gray-900">
-                    {b.product?.name || `#${b.product_id}`}
+                    {b.product?.name
+                      || (b.product_name_snapshot ? `${b.product_name_snapshot} (ջնջված)` : `#${b.product_id}`)}
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-700">
-                    {b.variant ? `${b.variant.size} / ${b.variant.color}` : `#${b.variant_id}`}
+                    {b.variant
+                      ? `${b.variant.size} / ${b.variant.color}`
+                      : (b.variant_name_snapshot
+                          ? `${b.variant_name_snapshot} (ջնջված)`
+                          : (b.variant_id != null ? `#${b.variant_id}` : "—"))}
                   </td>
                   <td className="px-6 py-4 text-sm font-medium">
                     {formatNumber(b.quantity_to_produce)}
@@ -200,6 +206,19 @@ export default async function ProductionPage({
                       {isAdmin && b.stage_status === "completed" && b.stock_added && (
                         <DeleteBatchButton
                           batchId={b.id}
+                          good={b.good_quantity}
+                          damaged={b.damaged_quantity}
+                        />
+                      )}
+                      {/* Universal admin force-delete: works in any stage
+                          (pending / in_progress / completed). Does NOT roll
+                          back inventory — confirmed by typed FORCE DELETE
+                          in the modal. */}
+                      {isAdmin && (
+                        <ForceDeleteBatchButton
+                          batchId={b.id}
+                          stageStatus={b.stage_status}
+                          materialsDeducted={b.materials_deducted}
                           good={b.good_quantity}
                           damaged={b.damaged_quantity}
                         />

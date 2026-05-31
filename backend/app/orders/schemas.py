@@ -32,7 +32,13 @@ class OrderItemVariantBrief(BaseModel):
 class OrderItemResponse(BaseModel):
     id: int
     order_id: int
-    product_variant_id: int
+    # Nullable since migration 015_variant_force_delete — admin force-delete
+    # of a ProductVariant snapshots the variant + product name onto the row
+    # and NULLs this FK. UI falls back to variant_name_snapshot +
+    # product_name_snapshot with the "(ջնջված)" marker.
+    product_variant_id: Optional[int] = None
+    variant_name_snapshot: Optional[str] = None
+    product_name_snapshot: Optional[str] = None
     quantity: int
     unit_price: Decimal
     notes: Optional[str] = None

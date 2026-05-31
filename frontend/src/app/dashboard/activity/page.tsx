@@ -27,6 +27,7 @@ const ACTION_LABELS: Record<string, string> = {
   "variant.created": "Տարբերակ ստեղծվեց",
   "variant.updated": "Տարբերակ փոփոխվեց",
   "variant.deleted": "Տարբերակ ջնջվեց",
+  "variant.force_deleted": "Տարբերակը ուժով ջնջվեց (պատվերները կպահպանվեն որպես ջնջված)",
   "material.created": "Նյութ ստեղծվեց",
   "material.updated": "Նյութ փոփոխվեց",
   "material.deleted": "Նյութ ջնջվեց",
@@ -226,16 +227,36 @@ export default async function ActivityPage({
                   </td>
                 </tr>
               )}
-              {items.map((log) => (
-                <tr key={log.id} className="hover:bg-gray-50 align-top">
+              {items.map((log) => {
+                // Force-delete actions are irreversible state mutations —
+                // they get a red tint + a Ուժով badge so an admin scanning
+                // the log can spot them at a glance without parsing the
+                // action string. The visual treatment is data-driven from
+                // the action name suffix so any future `<entity>.force_deleted`
+                // is covered automatically.
+                const isForceDelete = log.action.endsWith(".force_deleted");
+                return (
+                <tr
+                  key={log.id}
+                  className={`align-top ${isForceDelete ? "bg-red-50 hover:bg-red-100" : "hover:bg-gray-50"}`}
+                >
                   <td className="px-4 py-3 text-sm text-gray-700 whitespace-nowrap">
                     {formatDateTime(log.created_at)}
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-700 whitespace-nowrap">
                     {log.user_email || "—"}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-900">
-                    <div>{ACTION_LABELS[log.action] || log.action}</div>
+                  <td className={`px-4 py-3 text-sm ${isForceDelete ? "text-red-900" : "text-gray-900"}`}>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {isForceDelete && (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-red-600 text-white tracking-wide">
+                          Ուժով
+                        </span>
+                      )}
+                      <span className={isForceDelete ? "font-semibold" : ""}>
+                        {ACTION_LABELS[log.action] || log.action}
+                      </span>
+                    </div>
                     <div className="text-xs text-gray-400">{log.action}</div>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-700">
@@ -249,7 +270,8 @@ export default async function ActivityPage({
                     {log.ip_address || "—"}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </CardContent>

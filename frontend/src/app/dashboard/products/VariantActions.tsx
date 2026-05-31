@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { FormField, Input } from "@/components/ui/FormField";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import { showToast } from "@/lib/toast";
+import { ForceDeleteVariantButton } from "./ForceDeleteVariantButton";
 
 const VARIANT_DELETE_ERRORS: Record<string, string> = {
   variant_has_orders: "Հնարավոր չէ ջնջել. տարբերակը կապված է պատվերների հետ:",
@@ -380,7 +381,7 @@ function ProductMaterialRequirementsPanel({
 
 // ── Main VariantManager ───────────────────────────────────
 
-export function VariantManager({ productId, variants }: { productId: number; variants: ProductVariant[] }) {
+export function VariantManager({ productId, variants, isAdmin = false }: { productId: number; variants: ProductVariant[]; isAdmin?: boolean }) {
   const router = useRouter();
   const [showAdd, setShowAdd] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
@@ -515,19 +516,31 @@ export function VariantManager({ productId, variants }: { productId: number; var
                 {hasBlockers && editId !== v.id && (
                   <tr className="bg-amber-50">
                     <td colSpan={6} className="px-6 py-2 text-xs text-amber-900">
-                      <span className="font-medium">Չի կարող ջնջվել՝</span>{" "}
-                      {orderCount > 0 && (
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
                         <span>
-                          կապված է <strong>{orderCount}</strong> պատվերի հետ
+                          <span className="font-medium">Չի կարող ջնջվել՝</span>{" "}
+                          {orderCount > 0 && (
+                            <span>
+                              կապված է <strong>{orderCount}</strong> պատվերի հետ
+                            </span>
+                          )}
+                          {orderCount > 0 && batchCount > 0 && <span>, </span>}
+                          {batchCount > 0 && (
+                            <span>
+                              կապված է <strong>{batchCount}</strong> արտադրության հետ
+                            </span>
+                          )}
+                          :
                         </span>
-                      )}
-                      {orderCount > 0 && batchCount > 0 && <span>, </span>}
-                      {batchCount > 0 && (
-                        <span>
-                          կապված է <strong>{batchCount}</strong> արտադրության հետ
-                        </span>
-                      )}
-                      :
+                        {isAdmin && (
+                          <ForceDeleteVariantButton
+                            variantId={v.id}
+                            variantLabel={`${v.size} / ${v.color || "—"}`}
+                            orderItemsCount={orderCount}
+                            batchesCount={batchCount}
+                          />
+                        )}
+                      </div>
                     </td>
                   </tr>
                 )}

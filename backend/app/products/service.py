@@ -450,6 +450,113 @@ async def delete_product_size_requirement(db: AsyncSession, req_id: int) -> None
 # ── Force delete ────────────────────────────────────────
 
 
+async def force_delete_variant(
+    db: AsyncSession,
+    variant_id: int,
+    *,
+    admin_id: int,
+) -> dict:
+    """ADMIN ONLY. Hard-delete a ProductVariant regardless of its references.
+
+    Migration 015_variant_force_delete made `order_items.product_variant_id`
+    and `production_batches.variant_id` nullable and added snapshot columns
+    on both tables. This routine writes the snapshot, NULLs the FK on every
+    referrer, then deletes the variant.
+
+    Side effects on success:
+      * For every OrderItem referencing this variant:
+          variant_name_snapshot  = "<size> / <color>"
+          product_name_snapshot  = <product.name>
+          product_variant_id     = NULL
+        unit_price, quantity, fulfilled_from_stock, production_quantity,
+        and notes stay untouched.
+      * For every ProductionBatch referencing this variant:
+          variant_name_snapshot  = "<size> / <color>"
+          product_name_snapshot  = <product.name>
+          variant_id             = NULL
+        good/damaged counters, stage, materials_deducted, stock_added,
+        and stock_movements linked via batch_id stay untouched.
+      * The ProductVariant row is hard-deleted. ProductSizeMaterialRequirement
+        rows are keyed by (product, material, size) and do NOT reference
+        variant_id, so they are not cascaded.
+
+    No gate: admin force-delete is the explicit escape hatch when the
+    typed-409 normal delete (`variant_has_orders` /
+    `variant_has_production_batches`) refuses. UI requires the typed
+    `FORCE DELETE` confirmation before this is called.
+
+    Returns: {order_items_orphaned, batches_orphaned, variant_name,
+              product_name} used by the router for the audit details
+              string.
+    """
+    from sqlalchemy import update
+    from app.orders.models import OrderItem
+    from app.production.models import ProductionBatch
+
+    variant_result = await db.execute(
+        select(ProductVariant)
+        .options(selectinload(ProductVariant.product))
+        .where(ProductVariant.id == variant_id)
+        .with_for_update()
+    )
+    variant = variant_result.scalar_one_or_none()
+    if variant is None:
+        raise NotFoundException(detail=f"Variant {variant_id} not found")
+
+    product = variant.product
+    product_name = product.name if product is not None else f"#{variant.product_id}"
+    color_part = variant.color if variant.color else "—"
+    variant_name = f"{variant.size} / {color_part}"
+
+    order_items_orphaned = (await db.execute(
+        select(func.count()).select_from(OrderItem)
+        .where(OrderItem.product_variant_id == variant_id)
+    )).scalar() or 0
+    if order_items_orphaned:
+        await db.execute(
+            update(OrderItem)
+            .where(OrderItem.product_variant_id == variant_id)
+            .values(
+                variant_name_snapshot=variant_name,
+                product_name_snapshot=product_name,
+                product_variant_id=None,
+            )
+        )
+
+    batches_orphaned = (await db.execute(
+        select(func.count()).select_from(ProductionBatch)
+        .where(ProductionBatch.variant_id == variant_id)
+    )).scalar() or 0
+    if batches_orphaned:
+        await db.execute(
+            update(ProductionBatch)
+            .where(ProductionBatch.variant_id == variant_id)
+            .values(
+                variant_name_snapshot=variant_name,
+                product_name_snapshot=product_name,
+                variant_id=None,
+            )
+        )
+
+    await db.delete(variant)
+    await db.flush()
+
+    logger.warning(
+        "variant.force_deleted",
+        variant_id=variant_id,
+        product_id=variant.product_id,
+        admin_id=admin_id,
+        order_items_orphaned=order_items_orphaned,
+        batches_orphaned=batches_orphaned,
+    )
+    return {
+        "order_items_orphaned": order_items_orphaned,
+        "batches_orphaned": batches_orphaned,
+        "variant_name": variant_name,
+        "product_name": product_name,
+    }
+
+
 async def force_delete_product(
     db: AsyncSession,
     product_id: int,

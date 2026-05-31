@@ -294,22 +294,28 @@ async def force_delete_production_batch(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_roles(UserRole.admin)),
 ):
-    """ADMIN ONLY. Force-delete a completed ProductionBatch WITHOUT rolling
-    back inventory. Reserved for legacy batches created before migration
-    `013_stock_movement_batch_id` whose stock_movements rows carry no
-    batch_id linkage.
+    """ADMIN ONLY. Force-delete a ProductionBatch in ANY stage_status
+    (pending, in_progress, completed) without rolling back inventory.
+
+    Universal admin escape hatch. The safe rollback path
+    (`DELETE /production/batches/{id}`) is still preferred for completed
+    batches because it returns materials + finished stock to inventory.
+    This path explicitly preserves history at the cost of inventory
+    reconciliation.
 
     DANGEROUS:
       * Materials are NOT restored to inventory.
       * Sellable stock (variant.stock_quantity) is NOT decremented.
       * Damaged stock (variant.damaged_stock_quantity) is NOT decremented.
-      * Reports may no longer fully reconcile against this legacy batch.
-      * The action is irreversible.
+      * Linked stock_movements survive with batch_id auto-NULLed via FK
+        ON DELETE SET NULL (migration 013_stock_movement_batch_id), so the
+        consumption ledger remains visible but no longer attributes to a
+        batch.
+      * Reports may no longer fully reconcile against this batch.
+      * Action is irreversible.
 
-    Refused with structured error code when:
-      - the batch is pending or in_progress  (batch_not_completed)
-      - the batch has linked stock_movements (batch_has_linked_movements);
-        the safe DELETE /production/batches/{id} path must be used instead.
+    No backend gate: the typed `FORCE DELETE` UI confirmation is the only
+    barrier. Returns 404 if the batch is already gone.
     """
     existing = await service.get_production_batch_by_id(db, batch_id)
     snapshot = {
@@ -324,7 +330,7 @@ async def force_delete_production_batch(
         "stock_added": existing.stock_added,
         "completed_at": existing.completed_at.isoformat() if existing.completed_at else None,
     }
-    await service.force_delete_production_batch(db, batch_id, admin_id=admin.id)
+    summary = await service.force_delete_production_batch(db, batch_id, admin_id=admin.id)
     await activity_service.log_activity(
         db, user=admin, request=request,
         action="production.batch_force_deleted",
@@ -332,7 +338,10 @@ async def force_delete_production_batch(
         entity_id=batch_id,
         old_values=snapshot,
         details=(
-            "Force deleted legacy production batch without inventory rollback."
+            f"Force deleted production batch (stage_status={summary['stage_at_force']}, "
+            f"materials_deducted={summary['materials_deducted']}). "
+            f"Orphaned {summary['stock_movements_orphaned']} stock_movement(s) "
+            "via batch_id=NULL. Inventory and variant counters were NOT rolled back."
         ),
     )
 

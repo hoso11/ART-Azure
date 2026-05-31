@@ -77,7 +77,15 @@ class ProductionBatch(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id"), nullable=False)
-    variant_id: Mapped[int] = mapped_column(Integer, ForeignKey("product_variants.id"), nullable=False)
+    # Nullable since migration 015_variant_force_delete. Set to NULL by
+    # the admin variant force-delete flow, which snapshots the variant's
+    # "size / color" and the parent product's name into the *_snapshot
+    # columns before NULLing this column. Production history (good /
+    # damaged counts, stage progression, stock_movements via batch_id)
+    # otherwise stays intact for reports.
+    variant_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("product_variants.id"), nullable=True)
+    variant_name_snapshot: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    product_name_snapshot: Mapped[str | None] = mapped_column(String(255), nullable=True)
     quantity_to_produce: Mapped[int] = mapped_column(Integer, nullable=False)
     production_type: Mapped[str] = mapped_column(String(20), nullable=False, default="stock_based")
     current_stage: Mapped[str] = mapped_column(String(50), nullable=False, default="cutting")

@@ -1059,30 +1059,34 @@ async def force_delete_production_batch(
     *,
     admin_id: int,
 ) -> dict:
-    """ADMIN ONLY. Hard-delete a completed ProductionBatch WITHOUT rolling
-    back inventory. Reserved for legacy batches that predate migration
-    `013_stock_movement_batch_id` — their `stock_movements` rows carry no
-    `batch_id` linkage, so a safe rollback cannot be computed.
+    """ADMIN ONLY. Hard-delete a ProductionBatch regardless of stage_status
+    and regardless of whether stock_movements are linked.
 
-    Refusal codes:
-      batch_not_completed         — batch is pending/in_progress.
-      batch_has_linked_movements  — batch HAS linked stock_movements
-                                     (batch_id-tagged). The safe rollback
-                                     path (`delete_production_batch`) must be
-                                     used instead — force-delete is reserved
-                                     for legacy batches.
+    This is the universal admin escape hatch — the typed `FORCE DELETE`
+    UI confirmation is the only gate. The safe rollback path
+    (`delete_production_batch`) is still preferred for completed batches
+    because it returns materials + finished stock to inventory; this
+    path explicitly does NOT touch inventory.
 
     Side effects on success:
       * The batch row is hard-deleted.
       * No StockMovement is written, appended, or modified.
+      * Linked stock_movements rows survive with `batch_id` auto-NULLed
+        via the FK `ON DELETE SET NULL` introduced in migration
+        013_stock_movement_batch_id. Their material_id, quantity_change,
+        reason, and created_at stay intact — only the back-pointer to
+        the now-deleted batch is severed.
       * `Inventory.quantity_on_hand` is unchanged.
       * `ProductVariant.stock_quantity` and `damaged_stock_quantity` are
-        unchanged. Reports may no longer fully reconcile against this
-        legacy batch — this is the documented trade-off the caller accepted.
+        unchanged — admin can adjust inventory separately if needed.
+      * Reports may no longer fully reconcile against this batch; the
+        linked stock_movements remain visible in the consumption ledger
+        but no longer attribute to a batch.
 
-    Returns: {"materials_reversed": 0, "good_reversed": 0, "damaged_reversed": 0,
-              "force_deleted": True} so the audit-log details string can
-              report the no-op nature of the rollback explicitly.
+    Returns: {"materials_reversed": 0, "good_reversed": 0,
+              "damaged_reversed": 0, "force_deleted": True,
+              "stock_movements_orphaned": N, "stage_at_force": str,
+              "materials_deducted": bool}.
     """
     from app.inventory.models import StockMovement
 
@@ -1093,23 +1097,25 @@ async def force_delete_production_batch(
     if batch is None:
         raise NotFoundException(detail=f"Production batch {batch_id} not found")
 
-    if batch.stage_status != "completed" or not batch.stock_added:
-        raise ValidationException(
-            detail="Կարելի է ուժով ջնջել միայն ավարտված արտադրությունները",
-            code="batch_not_completed",
-        )
-
-    linked_count = (await db.execute(
+    stock_movements_orphaned = (await db.execute(
         select(func.count()).select_from(StockMovement)
         .where(StockMovement.batch_id == batch.id)
-    )).scalar()
-    if linked_count and linked_count > 0:
-        raise ValidationException(
-            detail=(
-                "Այս արտադրությունը ունի կապակցված շարժեր: "
-                "օգտագործեք սովորական ջնջումը՝ պաշարի վերականգնմամբ:"
-            ),
-            code="batch_has_linked_movements",
+    )).scalar() or 0
+
+    stage_at_force = batch.stage_status
+    materials_deducted = batch.materials_deducted
+
+    # Explicit pre-NULL: Postgres FK `ON DELETE SET NULL` (migration 013)
+    # would do this for us at delete time, but SQLite under the test
+    # engine does not enforce that action — so we do it ourselves to keep
+    # behavior identical across both backends. Postgres sees this as a
+    # harmless no-op (rows already NULLed before the FK kicks in).
+    if stock_movements_orphaned:
+        from sqlalchemy import update as _upd
+        await db.execute(
+            _upd(StockMovement)
+            .where(StockMovement.batch_id == batch.id)
+            .values(batch_id=None)
         )
 
     await db.delete(batch)
@@ -1121,6 +1127,9 @@ async def force_delete_production_batch(
         variant_id=batch.variant_id,
         good_quantity=batch.good_quantity,
         damaged_quantity=batch.damaged_quantity,
+        stage_at_force=stage_at_force,
+        materials_deducted=materials_deducted,
+        stock_movements_orphaned=stock_movements_orphaned,
         admin_id=admin_id,
     )
     return {
@@ -1128,4 +1137,7 @@ async def force_delete_production_batch(
         "good_reversed": 0,
         "damaged_reversed": 0,
         "force_deleted": True,
+        "stock_movements_orphaned": stock_movements_orphaned,
+        "stage_at_force": stage_at_force,
+        "materials_deducted": materials_deducted,
     }

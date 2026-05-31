@@ -88,7 +88,11 @@ export interface OrderItemVariantBrief {
 export interface OrderItem {
   id: number;
   order_id: number;
-  product_variant_id: number;
+  // Null when the variant was admin force-deleted (migration 015) — UI
+  // falls back to variant_name_snapshot + product_name_snapshot.
+  product_variant_id: number | null;
+  variant_name_snapshot: string | null;
+  product_name_snapshot: string | null;
   quantity: number;
   unit_price: number;
   notes: string | null;
@@ -170,7 +174,11 @@ export interface StockMovement {
 export interface ProductionBatch {
   id: number;
   product_id: number;
-  variant_id: number;
+  // Null when the variant was admin force-deleted (migration 015) — UI
+  // falls back to variant_name_snapshot + product_name_snapshot.
+  variant_id: number | null;
+  variant_name_snapshot: string | null;
+  product_name_snapshot: string | null;
   quantity_to_produce: number;
   production_type: string;
   current_stage: string;

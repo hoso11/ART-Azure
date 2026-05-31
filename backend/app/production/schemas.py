@@ -112,7 +112,13 @@ class ProductionBatchVariant(BaseModel):
 class ProductionBatchResponse(BaseModel):
     id: int
     product_id: int
-    variant_id: int
+    # Nullable since migration 015_variant_force_delete — admin force-delete
+    # of a ProductVariant snapshots the variant + product name onto the row
+    # and NULLs this FK. UI falls back to variant_name_snapshot +
+    # product_name_snapshot with the "(ջնջված)" marker.
+    variant_id: Optional[int] = None
+    variant_name_snapshot: Optional[str] = None
+    product_name_snapshot: Optional[str] = None
     quantity_to_produce: int
     production_type: str
     current_stage: str

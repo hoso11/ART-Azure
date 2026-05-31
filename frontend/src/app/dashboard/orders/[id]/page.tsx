@@ -89,15 +89,29 @@ export default async function OrderDetailPage({
                 <tbody className="divide-y divide-gray-200">
                   {order.items.map((item, idx) => {
                     const variant = item.product_variant;
-                    const productName = variant?.product?.name ?? `Տարբերակ #${item.product_variant_id}`;
+                    // When the variant was admin force-deleted (migration 015),
+                    // product_variant_id is NULL and the join returns null.
+                    // Fall back to the snapshot columns so the order history
+                    // stays readable, with a (ջնջված) marker.
+                    const orphaned = !variant && item.product_variant_id == null;
+                    const productName = orphaned
+                      ? `${item.product_name_snapshot ?? "—"} (ջնջված)`
+                      : variant?.product?.name ?? `Տարբերակ #${item.product_variant_id ?? "—"}`;
                     const avail = itemAvailability[idx];
                     return (
                     <tr key={item.id}>
                       <td className="px-6 py-4 text-sm">
-                        <div className="font-medium text-gray-900">{productName}</div>
+                        <div className={`font-medium ${orphaned ? "text-gray-500 italic" : "text-gray-900"}`}>
+                          {productName}
+                        </div>
                         {variant && (
                           <div className="text-xs text-gray-500 mt-0.5">
                             Չափս: {variant.size} · Գույն: {variant.color}
+                          </div>
+                        )}
+                        {orphaned && item.variant_name_snapshot && (
+                          <div className="text-xs text-gray-400 mt-0.5">
+                            {item.variant_name_snapshot}
                           </div>
                         )}
                       </td>

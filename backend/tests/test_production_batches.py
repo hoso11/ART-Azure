@@ -1667,11 +1667,17 @@ async def test_force_delete_non_admin_forbidden(
 
 
 @pytest.mark.asyncio
-async def test_force_delete_blocked_for_rollback_capable_batch(
-    client: AsyncClient, admin_user, customer, admin_cookies,
+async def test_force_delete_with_linked_movements_succeeds_orphans_them(
+    client: AsyncClient, admin_user, customer, admin_cookies, db_session,
 ):
-    """v38+ batch with linked stock_movements MUST go through the safe path.
-    Force-delete returns batch_has_linked_movements."""
+    """v47+ behavior: force-delete is the universal admin escape; it works
+    on batches WITH linked stock_movements too. The movements survive with
+    batch_id auto-NULLed via FK ON DELETE SET NULL, so the consumption
+    ledger stays intact but no longer attributes to a batch.
+    """
+    from sqlalchemy import select as _sel
+    from app.inventory.models import StockMovement
+
     product_id, variant_id = await _make_product(
         client, admin_cookies, sku="FORCE-LINKED-001", size="M", color="Navy"
     )
@@ -1685,20 +1691,37 @@ async def test_force_delete_blocked_for_rollback_capable_batch(
     )
     batch_id = create_resp.json()["id"]
     await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=5, damaged=0)
-    # Do NOT NULL the batch_id linkage — this is a normal v38+ batch.
+    # Confirm the movements ARE linked to this batch.
+    linked_before = (await db_session.execute(
+        _sel(StockMovement).where(StockMovement.batch_id == batch_id)
+    )).scalars().all()
+    assert len(linked_before) >= 1
 
     resp = await client.delete(
         f"/api/v1/production/batches/{batch_id}/force", cookies=admin_cookies,
     )
-    assert resp.status_code == 422
-    assert resp.json()["code"] == "batch_has_linked_movements"
+    assert resp.status_code == 204, resp.text
+
+    # Movements survive with batch_id NULLed.
+    still_linked = (await db_session.execute(
+        _sel(StockMovement).where(StockMovement.batch_id == batch_id)
+    )).scalars().all()
+    assert still_linked == []
+    # The ledger rows themselves still exist for the material.
+    for sm in linked_before:
+        await db_session.refresh(sm)
+        assert sm.batch_id is None
+        assert sm.material_id == mat_id
 
 
 @pytest.mark.asyncio
-async def test_force_delete_blocked_for_non_completed_batch(
+async def test_force_delete_succeeds_for_non_completed_batch(
     client: AsyncClient, admin_user, customer, admin_cookies, db_session,
 ):
-    """Pending and in-progress batches are not eligible for force-delete."""
+    """v47+ behavior: pending and in-progress batches are eligible for
+    force-delete. Inventory and variant counters are NOT rolled back —
+    the admin warning modal makes that explicit.
+    """
     product_id, variant_id = await _make_product(
         client, admin_cookies, sku="FORCE-NOTDONE-001", size="M", color="Aqua"
     )
@@ -1707,26 +1730,27 @@ async def test_force_delete_blocked_for_non_completed_batch(
         client, admin_cookies, product_id=product_id, material_id=mat_id,
         size="M", qty_per_item=1,
     )
-    create_resp = await _create_batch(
+
+    # Pending case: create + force-delete with no completion.
+    create_pending = await _create_batch(
         client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=10
     )
-    batch_id = create_resp.json()["id"]
-
-    # Pending (no completion at all)
+    batch_pending = create_pending.json()["id"]
     resp_pending = await client.delete(
-        f"/api/v1/production/batches/{batch_id}/force", cookies=admin_cookies,
+        f"/api/v1/production/batches/{batch_pending}/force", cookies=admin_cookies,
     )
-    assert resp_pending.status_code == 422
-    assert resp_pending.json()["code"] == "batch_not_completed"
+    assert resp_pending.status_code == 204, resp_pending.text
 
-    # In-progress (partial completion)
-    await _complete_batch_assert_ok(client, admin_cookies, batch_id, good=4, damaged=0)
-    await _null_batch_id_on_movements(db_session, batch_id)  # even legacy-style
-    resp_inprog = await client.delete(
-        f"/api/v1/production/batches/{batch_id}/force", cookies=admin_cookies,
+    # In-progress case: create + partial completion + force-delete.
+    create_inprog = await _create_batch(
+        client, admin_cookies, product_id=product_id, variant_id=variant_id, quantity=10
     )
-    assert resp_inprog.status_code == 422
-    assert resp_inprog.json()["code"] == "batch_not_completed"
+    batch_inprog = create_inprog.json()["id"]
+    await _complete_batch_assert_ok(client, admin_cookies, batch_inprog, good=4, damaged=0)
+    resp_inprog = await client.delete(
+        f"/api/v1/production/batches/{batch_inprog}/force", cookies=admin_cookies,
+    )
+    assert resp_inprog.status_code == 204, resp_inprog.text
 
 
 @pytest.mark.asyncio

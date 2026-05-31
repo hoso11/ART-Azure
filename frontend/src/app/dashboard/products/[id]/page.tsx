@@ -48,7 +48,7 @@ export default async function ProductDetailPage({
             {isAdmin ? (
               <CardContent className="p-0">
                 <div className="px-6 py-4">
-                  <VariantManager productId={product.id} variants={product.variants} />
+                  <VariantManager productId={product.id} variants={product.variants} isAdmin={isAdmin} />
                 </div>
               </CardContent>
             ) : (

@@ -729,3 +729,174 @@ async def test_variant_usage_counts_not_populated_on_list_endpoint(
     # Default 0 on list — the field exists but is not computed there.
     assert target_variant["order_items_count"] == 0
     assert target_variant["production_batches_count"] == 0
+
+
+# ── DELETE /products/variants/{id}/force — admin variant force-delete ────────
+
+
+@pytest.mark.asyncio
+async def test_force_delete_variant_no_references_succeeds(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage,
+):
+    """Variant with no order_items or batches → 204 (and gone)."""
+    product_id, variant_id = await _make_product_with_variant(
+        client, admin_cookies, sku="VFORCE-OK-001",
+    )
+    resp = await client.delete(
+        f"/api/v1/products/variants/{variant_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204, resp.text
+    p = (await client.get(f"/api/v1/products/{product_id}", cookies=admin_cookies)).json()
+    assert variant_id not in [v["id"] for v in p["variants"]]
+
+
+@pytest.mark.asyncio
+async def test_force_delete_variant_with_orders_snapshots_and_orphans(
+    client: AsyncClient, admin_user, customer, admin_cookies, fake_storage,
+):
+    """Variant with an order referencing it → 204; order_item preserved
+    with product_variant_id=NULL and snapshot fields populated."""
+    from app.orders.models import OrderItem
+    from sqlalchemy import select as _sel
+
+    from tests.conftest import TestSessionLocal
+
+    product_id, variant_id = await _make_product_with_variant(
+        client, admin_cookies, sku="VFORCE-ORD-001", stock=10,
+    )
+    order_resp = await client.post("/api/v1/orders", json={
+        "customer_id": customer.id,
+        "items": [{"product_variant_id": variant_id, "quantity": 2, "unit_price": 10.00}],
+    }, cookies=admin_cookies)
+    assert order_resp.status_code == 201
+    order_id = order_resp.json()["id"]
+
+    resp = await client.delete(
+        f"/api/v1/products/variants/{variant_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204, resp.text
+
+    async with TestSessionLocal() as session:
+        items = (await session.execute(
+            _sel(OrderItem).where(OrderItem.order_id == order_id)
+        )).scalars().all()
+        assert len(items) == 1
+        item = items[0]
+        assert item.product_variant_id is None
+        assert item.variant_name_snapshot
+        assert "M" in item.variant_name_snapshot
+        assert item.product_name_snapshot
+        # Quantity + price preserved for reports.
+        assert item.quantity == 2
+        assert float(item.unit_price) == 10.00
+
+
+@pytest.mark.asyncio
+async def test_force_delete_variant_with_batches_snapshots_and_orphans(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage,
+):
+    """Variant with a production batch referencing it → 204; batch row
+    preserved with variant_id=NULL and snapshot fields populated."""
+    from app.production.models import ProductionBatch
+    from sqlalchemy import select as _sel
+
+    from tests.conftest import TestSessionLocal
+
+    product_id, variant_id = await _make_product_with_variant(
+        client, admin_cookies, sku="VFORCE-BAT-001",
+    )
+    mat_resp = await client.post("/api/v1/inventory/materials", json={
+        "name": "VForce mat", "sku": "MAT-VFORCE-001", "unit": "m",
+        "quantity_on_hand": 50, "low_stock_threshold": 0,
+    }, cookies=admin_cookies)
+    mat_id = mat_resp.json()["id"]
+    await client.post(
+        f"/api/v1/products/{product_id}/size-requirements",
+        json={"material_id": mat_id, "size": "M", "quantity_per_item": 1},
+        cookies=admin_cookies,
+    )
+    batch_resp = await client.post("/api/v1/production/batches", json={
+        "product_id": product_id, "variant_id": variant_id, "quantity_to_produce": 5,
+    }, cookies=admin_cookies)
+    assert batch_resp.status_code == 201
+    batch_id = batch_resp.json()["id"]
+
+    resp = await client.delete(
+        f"/api/v1/products/variants/{variant_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204, resp.text
+
+    async with TestSessionLocal() as session:
+        b = (await session.execute(
+            _sel(ProductionBatch).where(ProductionBatch.id == batch_id)
+        )).scalar_one()
+        assert b.variant_id is None
+        assert b.variant_name_snapshot
+        assert b.product_name_snapshot
+
+
+@pytest.mark.asyncio
+async def test_force_delete_variant_writes_audit_row(
+    client: AsyncClient, admin_user, customer, admin_cookies, fake_storage,
+):
+    """Force-delete must write a variant.force_deleted ActivityLog row
+    with the snapshot and a non-empty details string."""
+    from app.activity.models import ActivityLog
+    from sqlalchemy import select as _sel
+
+    from tests.conftest import TestSessionLocal
+
+    product_id, variant_id = await _make_product_with_variant(
+        client, admin_cookies, sku="VFORCE-AUDIT-001", stock=5,
+    )
+    await client.post("/api/v1/orders", json={
+        "customer_id": customer.id,
+        "items": [{"product_variant_id": variant_id, "quantity": 1, "unit_price": 10.00}],
+    }, cookies=admin_cookies)
+
+    resp = await client.delete(
+        f"/api/v1/products/variants/{variant_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204
+
+    async with TestSessionLocal() as session:
+        rows = (await session.execute(
+            _sel(ActivityLog).where(ActivityLog.action == "variant.force_deleted")
+        )).scalars().all()
+        assert any(r.entity_id == variant_id for r in rows)
+        row = next(r for r in rows if r.entity_id == variant_id)
+        assert row.entity_type == "variant"
+        assert row.details and "Force deleted variant" in row.details
+        assert row.old_values  # snapshot present
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "role_name",
+    ["director", "production_manager", "warehouse_manager", "simple_user"],
+)
+async def test_force_delete_variant_non_admin_forbidden(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage, db_session, role_name,
+):
+    from app.users.models import UserRole as _UR
+    _, variant_id = await _make_product_with_variant(
+        client, admin_cookies, sku=f"VFORCE-RBAC-{role_name[:5]}",
+    )
+    actor = await _force_delete_make_helper_user(db_session, _UR(role_name))
+    actor_cookies = _force_delete_cookies_for(actor)
+    resp = await client.delete(
+        f"/api/v1/products/variants/{variant_id}/force", cookies=actor_cookies,
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "insufficient_permissions"
+
+
+@pytest.mark.asyncio
+async def test_force_delete_variant_not_found_returns_404(
+    client: AsyncClient, admin_user, admin_cookies,
+):
+    resp = await client.delete(
+        "/api/v1/products/variants/999999/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "not_found"

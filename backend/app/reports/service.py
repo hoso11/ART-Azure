@@ -332,13 +332,33 @@ async def get_sales_report(
                 product = product_map.get(variant.product_id) if variant else None
                 unit_price = Decimal(str(item.unit_price))
                 line_total = unit_price * item.quantity
+                # When the variant has been admin force-deleted (migration
+                # 015), product_variant_id is NULL and the variant/product
+                # joins return None. Fall back to the row's snapshot fields
+                # so the report still names the line, with a (ջնջված)
+                # marker so the reader knows the FK is gone.
+                if variant is None:
+                    snap_variant = item.variant_name_snapshot or ""
+                    snap_product = item.product_name_snapshot or ""
+                    parts = snap_variant.split(" / ", 1)
+                    size_val = parts[0] if parts and parts[0] else ""
+                    color_val = parts[1] if len(parts) == 2 else ""
+                    product_name_val = (
+                        f"{snap_product} (ջնջված)" if snap_product else "(ջնջված)"
+                    )
+                    sku_val = ""
+                else:
+                    product_name_val = product.name if product else ""
+                    sku_val = product.sku if product else ""
+                    size_val = variant.size
+                    color_val = variant.color
                 order_items.append({
                     "order_id": o.id,
                     "order_date": o.created_at.date().isoformat(),
-                    "product_name": product.name if product else "",
-                    "sku": product.sku if product else "",
-                    "size": variant.size if variant else "",
-                    "color": variant.color if variant else "",
+                    "product_name": product_name_val,
+                    "sku": sku_val,
+                    "size": size_val,
+                    "color": color_val,
                     "quantity": item.quantity,
                     "unit_price": float(unit_price),
                     "total_price": float(line_total),
