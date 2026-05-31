@@ -61,51 +61,51 @@ const COLUMNS: Record<ReportType, Col[]> = {
   orders: [
     { key: "id", label: "ID" },
     { key: "customer_name", label: "Հաճախորդ" },
-    { key: "status", label: "Կարգավիչակ", format: "badge" },
-    { key: "priority", label: "Kareviut", format: "badge" },
-    { key: "total_price", label: "Jamarak", format: "currency" },
-    { key: "created_at", label: "Stexjvel", format: "date" },
-    { key: "deadline", label: "Jam khet", format: "date" },
+    { key: "status", label: "Կարգավիճակ", format: "badge" },
+    { key: "priority", label: "Կարևորություն", format: "badge" },
+    { key: "total_price", label: "Ընդհանուր գումար", format: "currency" },
+    { key: "created_at", label: "Ստեղծվել է", format: "date" },
+    { key: "deadline", label: "Վերջնաժամկետ", format: "date" },
   ],
   sales: [],
   inventory: [
-    { key: "name", label: "Material" },
-    { key: "sku", label: "SKU" },
-    { key: "unit", label: "Unit" },
-    { key: "quantity_on_hand", label: "Available", format: "number" },
-    { key: "low_stock_threshold", label: "Minimum", format: "number" },
-    { key: "is_low_stock", label: "Low Stock", format: "bool" },
+    { key: "name", label: "Նյութ" },
+    { key: "sku", label: "Արտիկուլ" },
+    { key: "unit", label: "Չափման միավոր" },
+    { key: "quantity_on_hand", label: "Առկա քանակ", format: "number" },
+    { key: "low_stock_threshold", label: "Նվազագույն", format: "number" },
+    { key: "is_low_stock", label: "Ցածր մնացորդ", format: "bool" },
   ],
   "material-consumption": [
-    { key: "material_name", label: "Material" },
-    { key: "quantity_change", label: "Qty Change", format: "number" },
-    { key: "unit", label: "Unit" },
-    { key: "order_id", label: "Order" },
-    { key: "reason", label: "Reason", format: "badge" },
-    { key: "created_at", label: "Date", format: "date" },
-    { key: "created_by_email", label: "Admin" },
+    { key: "material_name", label: "Նյութ" },
+    { key: "quantity_change", label: "Քանակի փոփոխություն", format: "number" },
+    { key: "unit", label: "Չափման միավոր" },
+    { key: "order_id", label: "Պատվեր" },
+    { key: "reason", label: "Պատճառ", format: "badge" },
+    { key: "created_at", label: "Ամսաթիվ", format: "date" },
+    { key: "created_by_email", label: "Ադմին" },
   ],
   production: [
-    { key: "order_id", label: "Order ID" },
-    { key: "stage_name", label: "Stage", format: "badge" },
-    { key: "status", label: "Կարգավիչակ", format: "badge" },
-    { key: "started_at", label: "Started", format: "date" },
-    { key: "completed_at", label: "Completed", format: "date" },
+    { key: "order_id", label: "Պատվերի համար" },
+    { key: "stage_name", label: "Փուլ", format: "badge" },
+    { key: "status", label: "Կարգավիճակ", format: "badge" },
+    { key: "started_at", label: "Սկսվել է", format: "date" },
+    { key: "completed_at", label: "Ավարտվել է", format: "date" },
   ],
   "low-stock": [
-    { key: "name", label: "Material" },
-    { key: "sku", label: "SKU" },
-    { key: "unit", label: "Unit" },
-    { key: "quantity_on_hand", label: "Available", format: "number" },
-    { key: "low_stock_threshold", label: "Minimum", format: "number" },
-    { key: "missing", label: "Missing", format: "number" },
+    { key: "name", label: "Նյութ" },
+    { key: "sku", label: "Արտիկուլ" },
+    { key: "unit", label: "Չափման միավոր" },
+    { key: "quantity_on_hand", label: "Առկա քանակ", format: "number" },
+    { key: "low_stock_threshold", label: "Նվազագույն", format: "number" },
+    { key: "missing", label: "Բացակայող", format: "number" },
   ],
   "customer-discounts": [
     { key: "email", label: "Email" },
     { key: "customer_name", label: "Հաճախորդ" },
-    { key: "discount_percent", label: "Discount %", format: "number" },
-    { key: "total_orders", label: "Orders", format: "number" },
-    { key: "total_revenue", label: "Revenue", format: "currency" },
+    { key: "discount_percent", label: "Զեղչի տոկոս", format: "number" },
+    { key: "total_orders", label: "Պատվերներ", format: "number" },
+    { key: "total_revenue", label: "Եկամուտ", format: "currency" },
   ],
   "damaged-stock": [
     { key: "product_name", label: "Ապրանք" },
@@ -232,10 +232,10 @@ function SalesPreview({ data }: { data: SalesData }) {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Bnor patverner", value: summary.total_orders, color: "text-blue-700" },
+          { label: "Բոլոր պատվերներ", value: summary.total_orders, color: "text-blue-700" },
           { label: "Հաստատված", value: summary.confirmed_orders, color: "text-green-700" },
           { label: "Ավարտված", value: summary.completed_orders, color: "text-purple-700" },
-          { label: "Bnor Ehemut", value: formatCurrency(summary.total_revenue), color: "text-brand-800" },
+          { label: "Ընդհանուր եկամուտ", value: formatCurrency(summary.total_revenue), color: "text-brand-800" },
         ].map((item) => (
           <div key={item.label} className="bg-gray-50 rounded-lg p-4">
             <p className="text-xs text-gray-500">{item.label}</p>
@@ -246,14 +246,14 @@ function SalesPreview({ data }: { data: SalesData }) {
 
       {by_day.length > 0 && (
         <div>
-          <h4 className="text-sm font-semibold text-gray-700 mb-2">Revenue by Day</h4>
+          <h4 className="text-sm font-semibold text-gray-700 mb-2">Օրական եկամուտ</h4>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-200">
-                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Date</th>
-                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Orders</th>
-                  <th className="text-left py-2 text-gray-500 font-medium">Revenue</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Ամսաթիվ</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Պատվերներ</th>
+                  <th className="text-left py-2 text-gray-500 font-medium">Եկամուտ</th>
                 </tr>
               </thead>
               <tbody>
@@ -272,15 +272,15 @@ function SalesPreview({ data }: { data: SalesData }) {
 
       {by_customer.length > 0 && (
         <div>
-          <h4 className="text-sm font-semibold text-gray-700 mb-2">Revenue by Customer</h4>
+          <h4 className="text-sm font-semibold text-gray-700 mb-2">Եկամուտ ըստ հաճախորդի</h4>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-200">
-                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Customer</th>
-                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Company</th>
-                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Orders</th>
-                  <th className="text-left py-2 text-gray-500 font-medium">Revenue</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Հաճախորդ</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Ընկերություն</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Պատվերներ</th>
+                  <th className="text-left py-2 text-gray-500 font-medium">Եկամուտ</th>
                 </tr>
               </thead>
               <tbody>
@@ -300,15 +300,15 @@ function SalesPreview({ data }: { data: SalesData }) {
 
       {order_items && order_items.length > 0 && (
         <div>
-          <h4 className="text-sm font-semibold text-gray-700 mb-2">Order Items</h4>
+          <h4 className="text-sm font-semibold text-gray-700 mb-2">Պատվերի ապրանքներ</h4>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-200">
-                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Order #</th>
-                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Date</th>
-                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Product</th>
-                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">SKU</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Պատվեր #</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Ամսաթիվ</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Ապրանք</th>
+                  <th className="text-left py-2 pr-4 text-gray-500 font-medium">Արտիկուլ</th>
                   <th className="text-left py-2 pr-4 text-gray-500 font-medium">Չափս</th>
                   <th className="text-left py-2 pr-4 text-gray-500 font-medium">Գույն</th>
                   <th className="text-left py-2 pr-4 text-gray-500 font-medium">Քանակ</th>
@@ -473,7 +473,7 @@ export function ReportBuilder({
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        setError(err.detail || "Չhajogvets bozhel hasvetvowthouthy");
+        setError(err.detail || "Չհաջողվեց ստեղծել հաշվետվությունը");
         return;
       }
       const json = await res.json();
@@ -500,7 +500,7 @@ export function ReportBuilder({
         setCustomerOrders(next);
       }
     } catch {
-      setError("Կapich sxal");
+      setError("Կապի սխալ");
     } finally {
       setLoading(false);
     }
@@ -609,7 +609,7 @@ export function ReportBuilder({
             <div className="flex flex-wrap gap-4">
               {reportType === "orders" && (
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Կարգավիչակ</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Կարգավիճակ</label>
                   <select
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value)}
@@ -673,7 +673,7 @@ export function ReportBuilder({
               )}
               {reportType === "production" && (
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Արտադրության Կադառ</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Արտադրության փուլ</label>
                   <select
                     value={stageFilter}
                     onChange={(e) => setStageFilter(e.target.value)}
@@ -696,7 +696,7 @@ export function ReportBuilder({
               disabled={loading}
               className="px-4 py-2 bg-brand-800 text-white text-sm font-medium rounded-lg hover:bg-brand-900 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              {loading ? "ստեղծվում ե..." : "Ստեղծել Հաշվետվություն"}
+              {loading ? "Ստեղծվում է..." : "Ստեղծել հաշվետվություն"}
             </button>
             {generated && (
               <button
@@ -724,7 +724,7 @@ export function ReportBuilder({
                 {REPORT_TYPES.find((r) => r.value === reportType)?.label}
               </h4>
               {Array.isArray(reportData) && (
-                <span className="text-xs text-gray-400">{rows.length} տոլ</span>
+                <span className="text-xs text-gray-400">{rows.length} տող</span>
               )}
             </div>
 
