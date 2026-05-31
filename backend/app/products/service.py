@@ -14,8 +14,24 @@ from app.exceptions import NotFoundException, ConflictException, ValidationExcep
 # ── Categories ──────────────────────────────────────────
 
 async def list_categories(db: AsyncSession) -> list[ProductCategory]:
-    result = await db.execute(select(ProductCategory).order_by(ProductCategory.name))
-    return list(result.scalars().all())
+    """Return all categories with `product_count` attached as an in-memory
+    attribute. Pydantic's `from_attributes=True` on CategoryResponse picks
+    it up. Cheap aggregate: one LEFT JOIN GROUP BY query."""
+    result = await db.execute(
+        select(
+            ProductCategory,
+            func.count(Product.id).label("product_count"),
+        )
+        .outerjoin(Product, Product.category_id == ProductCategory.id)
+        .group_by(ProductCategory.id)
+        .order_by(ProductCategory.name)
+    )
+    cats: list[ProductCategory] = []
+    for cat, count in result.all():
+        # In-memory only — never persisted; Pydantic reads via from_attributes.
+        cat.product_count = int(count or 0)
+        cats.append(cat)
+    return cats
 
 
 async def get_category_by_id(db: AsyncSession, category_id: int) -> ProductCategory:
@@ -45,9 +61,85 @@ async def update_category(db: AsyncSession, category_id: int, **kwargs) -> Produ
 
 
 async def delete_category(db: AsyncSession, category_id: int) -> None:
+    """Normal delete. Refuses with structured 409 when products reference
+    this category — so admin can see the count and route to the typed
+    FORCE DELETE escape instead of getting a generic 500 IntegrityError.
+
+    Refusal code:
+      category_has_products (409) — at least one Product.category_id points here.
+    """
     cat = await get_category_by_id(db, category_id)
+    product_count = (await db.execute(
+        select(func.count()).select_from(Product)
+        .where(Product.category_id == category_id)
+    )).scalar() or 0
+    if product_count > 0:
+        raise ConflictException(
+            detail=(
+                f"Հնարավոր չէ ջնջել. կատեգորիան կապված է {product_count} ապրանքի հետ:"
+            ),
+            code="category_has_products",
+        )
     await db.delete(cat)
     await db.flush()
+
+
+async def force_delete_category(
+    db: AsyncSession,
+    category_id: int,
+    *,
+    admin_id: int,
+) -> dict:
+    """ADMIN ONLY. Hard-delete a category regardless of references.
+
+    `Product.category_id` is already nullable in the schema — no migration
+    needed. This routine NULLs the FK on every referring product, then
+    deletes the category. Products survive with their own name/sku/variants
+    intact; they simply become "uncategorized" (category=None in the UI).
+
+    No business gate: admin force-delete is the explicit escape from the
+    typed-409 normal delete (`category_has_products`). UI requires the
+    typed `FORCE DELETE` confirmation before this is called.
+
+    Returns: {products_orphaned, category_name} used by the router for
+    the audit details string.
+    """
+    from sqlalchemy import update
+
+    cat_result = await db.execute(
+        select(ProductCategory)
+        .where(ProductCategory.id == category_id)
+        .with_for_update()
+    )
+    cat = cat_result.scalar_one_or_none()
+    if cat is None:
+        raise NotFoundException(detail=f"Category {category_id} not found")
+
+    category_name = cat.name
+    products_orphaned = (await db.execute(
+        select(func.count()).select_from(Product)
+        .where(Product.category_id == category_id)
+    )).scalar() or 0
+    if products_orphaned:
+        await db.execute(
+            update(Product)
+            .where(Product.category_id == category_id)
+            .values(category_id=None)
+        )
+
+    await db.delete(cat)
+    await db.flush()
+
+    logger.warning(
+        "category.force_deleted",
+        category_id=category_id,
+        admin_id=admin_id,
+        products_orphaned=products_orphaned,
+    )
+    return {
+        "products_orphaned": products_orphaned,
+        "category_name": category_name,
+    }
 
 
 # ── Products ────────────────────────────────────────────

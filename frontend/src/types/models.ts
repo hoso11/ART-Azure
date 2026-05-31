@@ -31,6 +31,9 @@ export interface ProductCategory {
   id: number;
   name: string;
   description: string | null;
+  // Populated by GET /categories so admin sees the blocker count inline
+  // and can route to typed FORCE DELETE without trial-and-error.
+  product_count?: number;
 }
 
 export interface ProductVariant {

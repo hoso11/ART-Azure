@@ -7,6 +7,7 @@ import { formatDate } from "@/lib/utils";
 import Link from "next/link";
 import { CreateProductButton } from "./ProductActions";
 import { ForceDeleteProductButton } from "./ForceDeleteProductButton";
+import { CategoryManagerButton } from "./CategoryManager";
 
 export default async function ProductsPage({
   searchParams,
@@ -27,7 +28,12 @@ export default async function ProductsPage({
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Ապրանքներ</h1>
-        {isAdmin && <CreateProductButton categories={categories || []} />}
+        {isAdmin && (
+          <div className="flex items-center gap-2">
+            <CategoryManagerButton categories={categories || []} />
+            <CreateProductButton categories={categories || []} />
+          </div>
+        )}
       </div>
 
       <Card>

@@ -29,6 +29,10 @@ class CategoryResponse(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
+    # Populated by list_categories so admin sees the blocker count inline
+    # before attempting a normal delete. Default 0 keeps the field optional
+    # on create/update response shapes that bypass the count aggregator.
+    product_count: int = 0
 
     model_config = {"from_attributes": True}
 

@@ -133,10 +133,55 @@ async def delete_category(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_roles(*BUSINESS_MANAGER)),
 ):
+    """Normal delete. Returns 409 `category_has_products` (with count in
+    the Armenian detail string) when the category still has products —
+    admin should use the `/force` endpoint instead.
+    """
     await service.delete_category(db, category_id)
     await activity_service.log_activity(
         db, user=admin, request=request,
         action="category.deleted", entity_type="category", entity_id=category_id,
+    )
+
+
+@categories_router.delete("/{category_id}/force", status_code=204)
+async def force_delete_category(
+    category_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_roles(UserRole.admin)),
+):
+    """ADMIN ONLY. Force-delete a category regardless of references.
+
+    Closes the Admin Override gap identified in the v47 audit: the normal
+    delete refuses with `category_has_products` (409) when products are
+    assigned; this route NULLs `Product.category_id` for every referring
+    product and then deletes the category.
+
+    Side effects on success:
+      * Every Product.category_id pointing at this category becomes NULL.
+        The product survives with name, sku, variants, images, recipes,
+        and all order/production history intact — it is simply
+        "uncategorized" in the UI until reassigned.
+      * Category row is hard-deleted.
+
+    No backend gate: the typed `FORCE DELETE` UI confirmation is the only
+    barrier. Returns 404 if the category is already gone.
+    """
+    existing = await service.get_category_by_id(db, category_id)
+    snapshot = {"name": existing.name, "description": existing.description}
+    summary = await service.force_delete_category(db, category_id, admin_id=admin.id)
+    await activity_service.log_activity(
+        db, user=admin, request=request,
+        action="category.force_deleted",
+        entity_type="category",
+        entity_id=category_id,
+        old_values=snapshot,
+        details=(
+            f"Force deleted category '{summary['category_name']}'. "
+            f"Cleared category_id on {summary['products_orphaned']} product(s); "
+            "products remain intact and become uncategorized."
+        ),
     )
 
 

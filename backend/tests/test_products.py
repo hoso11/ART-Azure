@@ -900,3 +900,182 @@ async def test_force_delete_variant_not_found_returns_404(
     )
     assert resp.status_code == 404
     assert resp.json()["code"] == "not_found"
+
+
+# ── DELETE /categories/{id} + /force — admin category force-delete (v48) ────
+
+
+@pytest.mark.asyncio
+async def test_list_categories_returns_product_count(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage,
+):
+    """GET /categories includes product_count per category — admin sees
+    the blocker upfront before attempting a normal delete."""
+    cat_resp = await client.post("/api/v1/categories", json={
+        "name": "Cat-Count-1", "description": "with products",
+    }, cookies=admin_cookies)
+    assert cat_resp.status_code == 201
+    cat_id = cat_resp.json()["id"]
+
+    empty_resp = await client.post("/api/v1/categories", json={
+        "name": "Cat-Count-2", "description": "no products",
+    }, cookies=admin_cookies)
+    empty_id = empty_resp.json()["id"]
+
+    await client.post("/api/v1/products", json={
+        "name": "CatCountProd", "sku": "CAT-COUNT-001",
+        "category_id": cat_id,
+        "variants": [{"size": "M", "color": "Sky", "price": 5.00, "stock_quantity": 0}],
+    }, cookies=admin_cookies)
+
+    list_resp = await client.get("/api/v1/categories")
+    assert list_resp.status_code == 200
+    cats_by_id = {c["id"]: c for c in list_resp.json()}
+    assert cats_by_id[cat_id]["product_count"] == 1
+    assert cats_by_id[empty_id]["product_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_category_blocked_by_products(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage,
+):
+    """Normal delete refuses with typed 409 category_has_products."""
+    cat_resp = await client.post("/api/v1/categories", json={
+        "name": "Cat-Del-Blocked", "description": "x",
+    }, cookies=admin_cookies)
+    cat_id = cat_resp.json()["id"]
+    await client.post("/api/v1/products", json={
+        "name": "BlockerProd", "sku": "CAT-BLK-001",
+        "category_id": cat_id,
+        "variants": [{"size": "M", "color": "Sky", "price": 5.00, "stock_quantity": 0}],
+    }, cookies=admin_cookies)
+
+    resp = await client.delete(f"/api/v1/categories/{cat_id}", cookies=admin_cookies)
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == "category_has_products"
+    # Count surfaces in the Armenian detail string.
+    assert "1" in body["detail"]
+
+
+@pytest.mark.asyncio
+async def test_delete_empty_category_succeeds(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage,
+):
+    """Category with zero products → normal delete works (existing behavior)."""
+    cat_resp = await client.post("/api/v1/categories", json={
+        "name": "Cat-Del-OK", "description": "empty",
+    }, cookies=admin_cookies)
+    cat_id = cat_resp.json()["id"]
+    resp = await client.delete(f"/api/v1/categories/{cat_id}", cookies=admin_cookies)
+    assert resp.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_force_delete_category_orphans_products(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage,
+):
+    """Force delete sets product.category_id to NULL and removes the category;
+    products survive intact with all metadata."""
+    from app.products.models import Product, ProductCategory
+    from sqlalchemy import select as _sel
+
+    from tests.conftest import TestSessionLocal
+
+    cat_resp = await client.post("/api/v1/categories", json={
+        "name": "Cat-Force-1", "description": "x",
+    }, cookies=admin_cookies)
+    cat_id = cat_resp.json()["id"]
+    prod_resp = await client.post("/api/v1/products", json={
+        "name": "ForceCatProd", "sku": "CAT-FORCE-001",
+        "category_id": cat_id,
+        "variants": [{"size": "M", "color": "Sky", "price": 5.00, "stock_quantity": 0}],
+    }, cookies=admin_cookies)
+    product_id = prod_resp.json()["id"]
+
+    resp = await client.delete(
+        f"/api/v1/categories/{cat_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204, resp.text
+
+    async with TestSessionLocal() as session:
+        cat = (await session.execute(
+            _sel(ProductCategory).where(ProductCategory.id == cat_id)
+        )).scalar_one_or_none()
+        assert cat is None, "category should be deleted"
+
+        product = (await session.execute(
+            _sel(Product).where(Product.id == product_id)
+        )).scalar_one()
+        assert product.category_id is None
+        assert product.name == "ForceCatProd"
+        assert product.sku == "CAT-FORCE-001"
+
+
+@pytest.mark.asyncio
+async def test_force_delete_category_writes_audit_row(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage,
+):
+    from app.activity.models import ActivityLog
+    from sqlalchemy import select as _sel
+
+    from tests.conftest import TestSessionLocal
+
+    cat_resp = await client.post("/api/v1/categories", json={
+        "name": "Cat-Audit", "description": "x",
+    }, cookies=admin_cookies)
+    cat_id = cat_resp.json()["id"]
+    await client.post("/api/v1/products", json={
+        "name": "AuditCatProd", "sku": "CAT-AUDIT-001",
+        "category_id": cat_id,
+        "variants": [{"size": "M", "color": "Sky", "price": 5.00, "stock_quantity": 0}],
+    }, cookies=admin_cookies)
+
+    resp = await client.delete(
+        f"/api/v1/categories/{cat_id}/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 204
+
+    async with TestSessionLocal() as session:
+        rows = (await session.execute(
+            _sel(ActivityLog).where(ActivityLog.action == "category.force_deleted")
+        )).scalars().all()
+        assert any(r.entity_id == cat_id for r in rows)
+        row = next(r for r in rows if r.entity_id == cat_id)
+        assert row.entity_type == "category"
+        assert row.details and "Force deleted category" in row.details
+        assert row.old_values["name"] == "Cat-Audit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "role_name",
+    ["director", "production_manager", "warehouse_manager", "simple_user"],
+)
+async def test_force_delete_category_non_admin_forbidden(
+    client: AsyncClient, admin_user, admin_cookies, fake_storage, db_session, role_name,
+):
+    from app.users.models import UserRole as _UR
+
+    cat_resp = await client.post("/api/v1/categories", json={
+        "name": f"Cat-RBAC-{role_name[:5]}", "description": "x",
+    }, cookies=admin_cookies)
+    cat_id = cat_resp.json()["id"]
+    actor = await _force_delete_make_helper_user(db_session, _UR(role_name))
+    actor_cookies = _force_delete_cookies_for(actor)
+    resp = await client.delete(
+        f"/api/v1/categories/{cat_id}/force", cookies=actor_cookies,
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "insufficient_permissions"
+
+
+@pytest.mark.asyncio
+async def test_force_delete_category_not_found_returns_404(
+    client: AsyncClient, admin_user, admin_cookies,
+):
+    resp = await client.delete(
+        "/api/v1/categories/999999/force", cookies=admin_cookies,
+    )
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "not_found"

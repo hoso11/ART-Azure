@@ -20,6 +20,7 @@ const ACTION_LABELS: Record<string, string> = {
   "category.created": "Կատեգորիա ստեղծվեց",
   "category.updated": "Կատեգորիա փոփոխվեց",
   "category.deleted": "Կատեգորիա ջնջվեց",
+  "category.force_deleted": "Կատեգորիան ուժով ջնջվեց (ապրանքները կդառնան առանց կատեգորիայի)",
   "product.created": "Ապրանք ստեղծվեց",
   "product.updated": "Ապրանք փոփոխվեց",
   "product.deleted": "Ապրանք ջնջվեց",
