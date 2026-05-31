@@ -2,6 +2,8 @@
 
 Snapshot as of the most recent verified working tree on `v12`. Future agents: confirm each line by running the listed verification command before relying on it — this file ages.
 
+> **For end users:** the practical, non-technical admin guide is at [`docs/ADMIN_USER_GUIDE.md`](../docs/ADMIN_USER_GUIDE.md) (Armenian). It walks through every dashboard module, normal vs. force delete, the six force-delete entities, and step-by-step recovery workflows.
+
 ## Azure deployment — currently live
 
 | Component | State | Live value |
